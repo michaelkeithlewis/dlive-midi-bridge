@@ -146,7 +146,15 @@ echo "  ════════════════════════
 echo "    Installation complete!"
 echo "  ══════════════════════════════════════════════════════"
 echo ""
-echo "  Launching setup wizard..."
-echo ""
 
-"$BIN_DIR/dlive-midi-bridge" setup
+# When running via curl|bash, stdin is the pipe — not the keyboard.
+# Redirect from /dev/tty so the interactive wizard can read input.
+if [[ -t 0 ]]; then
+    echo "  Launching setup wizard..."
+    echo ""
+    "$BIN_DIR/dlive-midi-bridge" setup
+else
+    echo "  Launching setup wizard..."
+    echo ""
+    "$BIN_DIR/dlive-midi-bridge" setup < /dev/tty
+fi
