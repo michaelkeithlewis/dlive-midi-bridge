@@ -1,0 +1,34 @@
+# dlive-midi-bridge configuration
+# Copy to /etc/dlive-midi-bridge/config.yaml (Pi) or ~/.config/dlive-midi-bridge/config.yaml
+
+# ── dLive Connection ─────────────────────────────────────────────────
+# IP address of your dLive MixRack or Surface
+dlive_ip: "192.168.1.80"
+
+# TCP port — defaults based on target:
+#   MixRack:  51325  (no TLS) / 51327 (TLS)
+#   Surface:  51328  (no TLS) / 51329 (TLS)
+# dlive_port: 51325
+
+# ── RTP-MIDI Settings ────────────────────────────────────────────────
+# Local UDP port for receiving RTP-MIDI (default: 5004)
+# local_port: 5004
+
+# Name this bridge advertises in RTP-MIDI sessions
+session_name: "dLive-MIDI-Bridge"
+
+# Only connect to RTP-MIDI peers whose name contains this string.
+# Leave commented out to accept all peers.
+# filter_name: "Tracks"
+
+# ── MIDI Options ─────────────────────────────────────────────────────
+# Only forward messages on this MIDI channel (1-16).
+# Leave commented out to pass all channels.
+# midi_channel: 1
+
+# ── Logging ──────────────────────────────────────────────────────────
+# Log every MIDI message (great for debugging, noisy in production)
+log_midi: false
+
+# Debug-level logging
+verbose: false

@@ -1,0 +1,26 @@
+[Unit]
+Description=dLive MIDI Bridge — RTP-MIDI to Allen & Heath dLive TCP
+Documentation=https://github.com/backlinelogic/dlive-midi-bridge
+After=network-online.target avahi-daemon.service
+Wants=network-online.target avahi-daemon.service
+
+[Service]
+Type=simple
+User=dlive-bridge
+Group=dlive-bridge
+ExecStart=/usr/local/bin/dlive-midi-bridge --config /etc/dlive-midi-bridge/config.yaml
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dlive-midi-bridge
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/etc/dlive-midi-bridge
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
