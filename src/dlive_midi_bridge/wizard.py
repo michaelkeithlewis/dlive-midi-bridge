@@ -36,6 +36,25 @@ RESET = "\033[0m"
 
 USE_COLOR = sys.stdout.isatty()
 
+# When launched from a curl|bash pipe, stdin is the download stream.
+# Reopen from /dev/tty so we can actually read keyboard input.
+_tty_input = None
+
+
+def _ensure_tty():
+    """Ensure we're reading from the real terminal, not a pipe."""
+    global _tty_input
+    if _tty_input is not None:
+        return
+    if sys.stdin.isatty():
+        _tty_input = sys.stdin
+        return
+    try:
+        _tty_input = open("/dev/tty", "r")
+        sys.stdin = _tty_input
+    except OSError:
+        _tty_input = sys.stdin
+
 
 def _c(code: str, text: str) -> str:
     return f"{code}{text}{RESET}" if USE_COLOR else text
@@ -475,6 +494,7 @@ def print_summary(config: dict, config_path: Path):
 # ── Main wizard entry point ──────────────────────────────────────────
 
 def run_wizard():
+    _ensure_tty()
     banner()
 
     dlive_ip = step_dlive_ip()
