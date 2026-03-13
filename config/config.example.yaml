@@ -26,6 +26,15 @@ session_name: "dLive-MIDI-Bridge"
 # Leave commented out to pass all channels.
 # midi_channel: 1
 
+# ── Local MIDI (USB / hardware) ──────────────────────────────────────
+# Enable local MIDI input from USB controllers and hardware interfaces.
+# These messages are forwarded to the dLive alongside network RTP-MIDI.
+local_midi: false
+
+# Only open local MIDI ports whose name contains this string.
+# Useful when multiple devices are connected.
+# local_midi_filter: "nanoKONTROL"
+
 # ── Logging ──────────────────────────────────────────────────────────
 # Log every MIDI message (great for debugging, noisy in production)
 log_midi: false

@@ -15,6 +15,7 @@ from typing import Optional
 
 from .rtp_midi import RTPMIDIReceiver
 from .dlive_tcp import DLiveTCPConnection, DLIVE_MIXRACK_PORT, DLIVE_SURFACE_PORT
+from .local_midi import LocalMIDIInput
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ class MIDIBridge:
         filter_name: Optional[str] = None,
         midi_channel: Optional[int] = None,
         log_midi: bool = False,
+        enable_local_midi: bool = False,
+        local_midi_filter: Optional[str] = None,
     ):
         self.dlive_host = dlive_host
         self.dlive_port = dlive_port
@@ -49,9 +52,12 @@ class MIDIBridge:
         self.filter_name = filter_name
         self.midi_channel = midi_channel
         self.log_midi = log_midi
+        self.enable_local_midi = enable_local_midi
+        self.local_midi_filter = local_midi_filter
 
         self._dlive: Optional[DLiveTCPConnection] = None
         self._receiver: Optional[RTPMIDIReceiver] = None
+        self._local_midi: Optional[LocalMIDIInput] = None
         self._running = False
         self._midi_count = 0
 
@@ -139,6 +145,9 @@ class MIDIBridge:
             logger.info(f"  Peer filter:   {self.filter_name}")
         if self.midi_channel is not None:
             logger.info(f"  MIDI channel:  {self.midi_channel + 1}")
+        if self.enable_local_midi:
+            filt = self.local_midi_filter or "all"
+            logger.info(f"  Local MIDI:    enabled (filter: {filt})")
         logger.info("=" * 60)
 
         # Start dLive TCP connection
@@ -158,6 +167,15 @@ class MIDIBridge:
             filter_name=self.filter_name,
         )
         await self._receiver.start()
+
+        # Start local MIDI input (USB controllers, hardware interfaces)
+        if self.enable_local_midi:
+            self._local_midi = LocalMIDIInput(
+                midi_callback=self._on_midi_received,
+                port_name_filter=self.local_midi_filter,
+                log_midi=self.log_midi,
+            )
+            self._local_midi.start()
 
         logger.info("Bridge running. Waiting for MIDI...")
 
@@ -181,6 +199,8 @@ class MIDIBridge:
         """Stop the bridge gracefully."""
         self._running = False
         logger.info("Shutting down bridge...")
+        if self._local_midi:
+            self._local_midi.stop()
         if self._receiver:
             await self._receiver.stop()
         if self._dlive:
