@@ -368,24 +368,23 @@ class AppleMIDISession:
 
     # ── Session lifecycle ────────────────────────────────────────────
 
-    async def start(self, loop: asyncio.AbstractEventLoop):
+    async def start(self, loop: asyncio.AbstractEventLoop, bind_ip: Optional[str] = None):
         """Bind UDP sockets and optionally send invitation to peer."""
         control_port = self.local_port
         data_port = self.local_port + 1
+        bind_addr = bind_ip or "0.0.0.0"
 
-        # Bind control port
         _, _ = await loop.create_datagram_endpoint(
             lambda: self._ControlProtocol(self),
-            local_addr=("0.0.0.0", control_port),
+            local_addr=(bind_addr, control_port),
         )
-        logger.info(f"Control port bound on UDP/{control_port}")
+        logger.info(f"Control port bound on {bind_addr}:{control_port}")
 
-        # Bind data port
         _, _ = await loop.create_datagram_endpoint(
             lambda: self._DataProtocol(self),
-            local_addr=("0.0.0.0", data_port),
+            local_addr=(bind_addr, data_port),
         )
-        logger.info(f"Data port bound on UDP/{data_port}")
+        logger.info(f"Data port bound on {bind_addr}:{data_port}")
 
         # If we have a specific peer, send invitation
         if self.peer_addr:
@@ -486,9 +485,9 @@ class BonjourMIDIBrowser:
         elif state_change == ServiceStateChange.Removed:
             logger.info(f"RTP-MIDI session removed: {name}")
 
-    def start(self):
+    def start(self, **zeroconf_kwargs):
         """Start browsing for RTP-MIDI services."""
-        self._zeroconf = Zeroconf()
+        self._zeroconf = Zeroconf(**zeroconf_kwargs)
         self._browser = ServiceBrowser(
             self._zeroconf,
             self.SERVICE_TYPE,
@@ -522,11 +521,13 @@ class RTPMIDIReceiver:
         session_name: str = "dLive-MIDI-Bridge",
         local_port: int = 5004,
         filter_name: Optional[str] = None,
+        bind_ip: Optional[str] = None,
     ):
         self.midi_callback = midi_callback
         self.session_name = session_name
         self.local_port = local_port
         self.filter_name = filter_name
+        self.bind_ip = bind_ip
 
         self._sessions: dict[str, AppleMIDISession] = {}
         self._browser: Optional[BonjourMIDIBrowser] = None
@@ -549,19 +550,25 @@ class RTPMIDIReceiver:
 
         if self._loop:
             asyncio.run_coroutine_threadsafe(
-                session.start(self._loop), self._loop
+                session.start(self._loop, bind_ip=self.bind_ip), self._loop
             )
 
     async def start(self):
         """Start the receiver: browse for peers and accept sessions."""
         self._loop = asyncio.get_running_loop()
 
-        # Start Bonjour browsing
+        # Start Bonjour browsing (scoped to interface if bind_ip set)
+        zc_kwargs = {}
+        if self.bind_ip:
+            import ipaddress
+            zc_kwargs["interfaces"] = [self.bind_ip]
+            logger.info(f"Zeroconf bound to {self.bind_ip}")
+
         self._browser = BonjourMIDIBrowser(
             on_discovered=self._on_peer_discovered,
             filter_name=self.filter_name,
         )
-        self._browser.start()
+        self._browser.start(**zc_kwargs)
 
     def send_midi(self, data: bytes):
         """Send MIDI bytes to all connected RTP-MIDI peers."""

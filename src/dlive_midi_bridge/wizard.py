@@ -171,8 +171,13 @@ def test_tcp_connection(host: str, port: int, timeout: float = 5.0) -> bool:
         sock.close()
 
 
-def _get_local_subnet() -> Optional[str]:
-    """Get the local IP's /24 subnet prefix (e.g. '192.168.1.')."""
+def _get_local_subnet(bind_ip: Optional[str] = None) -> Optional[str]:
+    """Get a /24 subnet prefix (e.g. '192.168.1.') from a known IP or auto-detect."""
+    if bind_ip:
+        parts = bind_ip.split(".")
+        if len(parts) == 4:
+            return ".".join(parts[:3]) + "."
+
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -250,12 +255,175 @@ def scan_midi_ports() -> list[str]:
         return []
 
 
+# ── Network interface detection ──────────────────────────────────────
+
+WIFI_KEYWORDS = ("wi-fi", "wifi", "wlan", "airport", "wireless")
+
+
+def get_network_interfaces() -> list[dict]:
+    """
+    Return a list of active network interfaces with IPs and human-readable names.
+    Each entry: {"device": "en4", "ip": "192.168.1.50", "label": "Ethernet Adapter"}
+    """
+    interfaces = []
+
+    if platform.system() == "Darwin":
+        interfaces = _get_interfaces_macos()
+    else:
+        interfaces = _get_interfaces_linux()
+
+    return interfaces
+
+
+def _get_interfaces_macos() -> list[dict]:
+    import re
+
+    port_map: dict[str, str] = {}
+    try:
+        result = subprocess.run(
+            ["networksetup", "-listallhardwareports"],
+            capture_output=True, text=True, timeout=5,
+        )
+        current_name = None
+        for line in result.stdout.splitlines():
+            m = re.match(r"Hardware Port:\s*(.+)", line)
+            if m:
+                current_name = m.group(1)
+            m = re.match(r"Device:\s*(\S+)", line)
+            if m and current_name:
+                port_map[m.group(1)] = current_name
+                current_name = None
+    except Exception:
+        pass
+
+    interfaces = []
+    try:
+        result = subprocess.run(
+            ["ifconfig"], capture_output=True, text=True, timeout=5,
+        )
+        import re
+        current_iface = None
+        for line in result.stdout.splitlines():
+            m = re.match(r"(\w+):", line)
+            if m:
+                current_iface = m.group(1)
+            m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", line)
+            if m and current_iface and current_iface != "lo0":
+                ip = m.group(1)
+                if not ip.startswith("127."):
+                    label = port_map.get(current_iface, current_iface)
+                    interfaces.append({
+                        "device": current_iface,
+                        "ip": ip,
+                        "label": label,
+                    })
+    except Exception:
+        pass
+
+    return interfaces
+
+
+def _get_interfaces_linux() -> list[dict]:
+    import re
+    interfaces = []
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 4:
+                device = parts[1]
+                m = re.search(r"(\d+\.\d+\.\d+\.\d+)", parts[3])
+                if m and device != "lo":
+                    ip = m.group(1)
+                    if not ip.startswith("127."):
+                        label = _linux_interface_label(device)
+                        interfaces.append({
+                            "device": device,
+                            "ip": ip,
+                            "label": label,
+                        })
+    except Exception:
+        pass
+
+    return interfaces
+
+
+def _linux_interface_label(device: str) -> str:
+    if device.startswith("eth"):
+        return f"Ethernet ({device})"
+    if device.startswith("enp") or device.startswith("eno"):
+        return f"Ethernet ({device})"
+    if device.startswith("wl"):
+        return f"Wi-Fi ({device})"
+    if device.startswith("br") or device.startswith("docker") or device.startswith("veth"):
+        return f"Virtual ({device})"
+    if device.startswith("usb"):
+        return f"USB Ethernet ({device})"
+    return device
+
+
+def _is_wifi(iface: dict) -> bool:
+    label_lower = iface["label"].lower()
+    return any(kw in label_lower for kw in WIFI_KEYWORDS)
+
+
 # ── Wizard steps ─────────────────────────────────────────────────────
 
-def step_dlive_ip() -> str:
-    step_header(1, "dLive IP Address")
+def step_network_interface() -> Optional[str]:
+    step_header(1, "Network Interface")
 
-    subnet = _get_local_subnet()
+    interfaces = get_network_interfaces()
+
+    if not interfaces:
+        warn("Could not detect any active network interfaces.")
+        print("  The bridge will listen on all interfaces.\n")
+        return None
+
+    wired = [i for i in interfaces if not _is_wifi(i)]
+    wifi = [i for i in interfaces if _is_wifi(i)]
+
+    if not wired and wifi:
+        warn("Only Wi-Fi interfaces found — no wired ethernet detected.")
+        warn("For live sound, a wired connection is strongly recommended.")
+        print()
+        use_wifi = ask_yes_no("Use Wi-Fi anyway?", default=True)
+        if use_wifi:
+            if len(wifi) == 1:
+                chosen = wifi[0]
+                ok(f"Using {chosen['label']}  ({chosen['ip']})")
+                return chosen["ip"]
+            options = [
+                (i["ip"], f"{i['label']:30s}  {i['ip']}")
+                for i in wifi
+            ]
+            ip = ask_choice("Which interface?", options)
+            return ip
+        else:
+            print("  Plug in an ethernet cable and run 'dlive setup' again.\n")
+            sys.exit(0)
+
+    display = wired if wired else interfaces
+
+    if len(display) == 1:
+        chosen = display[0]
+        ok(f"Found: {chosen['label']}  ({chosen['ip']})")
+        return chosen["ip"]
+
+    print("  Multiple wired interfaces found:\n")
+    options = [
+        (i["ip"], f"{i['label']:30s}  {i['ip']}")
+        for i in display
+    ]
+    ip = ask_choice("Which interface should the bridge use?", options)
+    return ip
+
+
+def step_dlive_ip(bind_ip: Optional[str] = None) -> str:
+    step_header(2, "dLive IP Address")
+
+    subnet = _get_local_subnet(bind_ip)
     if subnet:
         print(f"  Your network: {subnet}x")
         if ask_yes_no("Scan the network for dLive consoles?", default=True):
@@ -300,7 +468,7 @@ def step_dlive_ip() -> str:
 
 
 def step_test_connection(host: str, port: int):
-    step_header(2, "Connection Test")
+    step_header(3, "Connection Test")
     print(f"  Testing TCP connection to {host}:{port}...")
     print()
     if test_tcp_connection(host, port):
@@ -315,7 +483,7 @@ def step_test_connection(host: str, port: int):
 
 
 def step_rtp_midi() -> tuple[str, Optional[str]]:
-    step_header(3, "RTP-MIDI Settings")
+    step_header(4, "RTP-MIDI Settings")
     session_name = ask("Session name (how this bridge appears on the network)",
                        default="dLive-MIDI-Bridge")
     print()
@@ -329,7 +497,7 @@ def step_rtp_midi() -> tuple[str, Optional[str]]:
 
 
 def step_local_midi() -> tuple[bool, Optional[str]]:
-    step_header(4, "Local MIDI (USB / Hardware)")
+    step_header(5, "Local MIDI (USB / Hardware)")
     ports = scan_midi_ports()
     if ports:
         print(f"  Found {len(ports)} MIDI input port(s):")
@@ -355,7 +523,7 @@ def step_local_midi() -> tuple[bool, Optional[str]]:
 
 
 def step_midi_options() -> tuple[Optional[int], bool]:
-    step_header(5, "MIDI Options")
+    step_header(6, "MIDI Options")
     if ask_yes_no("Filter to a specific MIDI channel?", default=False):
         while True:
             raw = ask("MIDI channel (1-16)")
@@ -385,7 +553,7 @@ def _default_config_path() -> Path:
 
 
 def step_write_config(config: dict) -> Path:
-    step_header(6, "Write Configuration")
+    step_header(7, "Write Configuration")
     default_path = _default_config_path()
     path_str = ask("Config file location", default=str(default_path))
     config_path = Path(path_str).expanduser()
@@ -544,7 +712,7 @@ def _install_systemd(config_path: Path):
 
 
 def step_install_service(config_path: Path):
-    step_header(7, "Install as System Service")
+    step_header(8, "Install as System Service")
     system = platform.system()
 
     if system == "Darwin":
@@ -577,6 +745,8 @@ def print_summary(config: dict, config_path: Path):
     print(_c(BOLD, "  ╚══════════════════════════════════════════════════╝"))
     print()
     print(f"  Config file: {config_path}")
+    if config.get("bind_ip"):
+        print(f"  Interface:   {config['bind_ip']}")
     print(f"  dLive:       {config['dlive_ip']}:{config.get('dlive_port', DLIVE_MIXRACK_PORT)}")
     if config.get("local_midi"):
         filt = config.get("local_midi_filter", "all devices")
@@ -591,7 +761,8 @@ def run_wizard():
     _ensure_tty()
     banner()
 
-    dlive_ip = step_dlive_ip()
+    bind_ip = step_network_interface()
+    dlive_ip = step_dlive_ip(bind_ip)
     dlive_port = DLIVE_MIXRACK_PORT
     step_test_connection(dlive_ip, dlive_port)
     session_name, filter_name = step_rtp_midi()
@@ -601,6 +772,7 @@ def run_wizard():
     config = {
         "dlive_ip": dlive_ip,
         "dlive_port": dlive_port,
+        "bind_ip": bind_ip,
         "session_name": session_name,
         "filter_name": filter_name,
         "local_midi": enable_local_midi,

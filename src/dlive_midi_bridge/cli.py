@@ -124,6 +124,8 @@ def _handle_status():
     if config_path:
         config = _load_config(config_path)
         print(f"Config:    {config_path}")
+        if config.get("bind_ip"):
+            print(f"Interface: {config['bind_ip']}")
         print(f"dLive IP:  {config.get('dlive_ip', 'not set')}")
         print(f"Session:   {config.get('session_name', 'dLive-MIDI-Bridge')}")
     else:
@@ -355,6 +357,7 @@ def _handle_run(args):
 
     enable_local_midi = getattr(args, "local_midi", False) or config.get("local_midi", False)
     local_midi_filter = getattr(args, "local_midi_filter", None) or config.get("local_midi_filter")
+    bind_ip = config.get("bind_ip")
 
     _setup_logging(verbose=verbose, quiet=quiet)
 
@@ -368,6 +371,7 @@ def _handle_run(args):
         log_midi=log_midi,
         enable_local_midi=enable_local_midi,
         local_midi_filter=local_midi_filter,
+        bind_ip=bind_ip,
     )
 
     try:

@@ -45,6 +45,7 @@ class MIDIBridge:
         log_midi: bool = False,
         enable_local_midi: bool = False,
         local_midi_filter: Optional[str] = None,
+        bind_ip: Optional[str] = None,
     ):
         self.dlive_host = dlive_host
         self.dlive_port = dlive_port
@@ -55,6 +56,7 @@ class MIDIBridge:
         self.log_midi = log_midi
         self.enable_local_midi = enable_local_midi
         self.local_midi_filter = local_midi_filter
+        self.bind_ip = bind_ip
 
         self._dlive: Optional[DLiveTCPConnection] = None
         self._receiver: Optional[RTPMIDIReceiver] = None
@@ -186,6 +188,7 @@ class MIDIBridge:
             session_name=self.session_name,
             local_port=self.local_port,
             filter_name=self.filter_name,
+            bind_ip=self.bind_ip,
         )
         await self._receiver.start()
 
