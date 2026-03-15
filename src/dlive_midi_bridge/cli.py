@@ -23,7 +23,7 @@ from typing import Optional
 import yaml
 
 from . import __version__
-from .dlive_tcp import DLIVE_MIXRACK_PORT, DLIVE_SURFACE_PORT
+from .dlive_tcp import DLIVE_MIXRACK_PORT
 
 
 # ── Config auto-discovery ────────────────────────────────────────────
@@ -235,6 +235,36 @@ def _handle_uninstall():
     print()
 
 
+# ── Help ─────────────────────────────────────────────────────────────
+
+HELP_TEXT = """
+  dLive MIDI Bridge — Commands
+  ════════════════════════════════════════════════
+
+  dlive              Run the bridge (auto-finds your config)
+  dlive setup        Interactive setup wizard
+  dlive scan         Find dLive consoles on the network
+  dlive test         Send test MIDI messages (interactive)
+
+  dlive start        Start the background service
+  dlive stop         Stop the background service
+  dlive restart      Restart the background service
+  dlive status       Show config + whether bridge is running
+
+  dlive help         Show this help
+  dlive uninstall    Remove everything
+
+  Advanced (power-user):
+    dlive run --dlive-ip 192.168.1.80 --log-midi --verbose
+    dlive run --list-midi-ports
+    dlive --version
+"""
+
+
+def print_help():
+    print(HELP_TEXT)
+
+
 # ── Scan ─────────────────────────────────────────────────────────────
 
 def _handle_scan():
@@ -305,13 +335,10 @@ def _handle_run(args):
         sys.exit(1)
 
     dlive_port_arg = getattr(args, "dlive_port", None)
-    target = getattr(args, "target", "mixrack")
     if dlive_port_arg:
         dlive_port = dlive_port_arg
     elif "dlive_port" in config:
         dlive_port = config["dlive_port"]
-    elif target == "surface":
-        dlive_port = DLIVE_SURFACE_PORT
     else:
         dlive_port = DLIVE_MIXRACK_PORT
 
@@ -354,8 +381,7 @@ def _handle_run(args):
 def _add_run_args(parser: argparse.ArgumentParser):
     conn = parser.add_argument_group("dLive connection")
     conn.add_argument("--dlive-ip", help="IP address of the dLive")
-    conn.add_argument("--dlive-port", type=int, help="TCP port")
-    conn.add_argument("--target", choices=["mixrack", "surface"], default="mixrack")
+    conn.add_argument("--dlive-port", type=int, help="TCP port (default: 51325)")
 
     rtp = parser.add_argument_group("RTP-MIDI")
     rtp.add_argument("--local-port", type=int, default=None)
@@ -398,6 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command")
 
+    subparsers.add_parser("help", help="Show all available commands")
     subparsers.add_parser("setup", help="Interactive setup wizard")
     subparsers.add_parser("scan", help="Find dLive consoles on the network")
     subparsers.add_parser("test", help="Send test MIDI messages")
@@ -421,7 +448,9 @@ def main():
 
     cmd = args.command
 
-    if cmd == "setup":
+    if cmd == "help":
+        print_help()
+    elif cmd == "setup":
         from .wizard import run_wizard
         run_wizard()
     elif cmd == "scan":

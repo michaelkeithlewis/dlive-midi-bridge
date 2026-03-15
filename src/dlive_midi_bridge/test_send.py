@@ -14,19 +14,19 @@ import asyncio
 import logging
 import sys
 
-from .dlive_tcp import DLiveTCPConnection, DLIVE_MIXRACK_PORT, DLIVE_SURFACE_PORT
+from .dlive_tcp import DLiveTCPConnection, DLIVE_MIXRACK_PORT
 
 
 logger = logging.getLogger(__name__)
 
 TRUCK_PACKER_BANNER = r"""
+                     s p o n s o r e d   b y
+
   _____ ____  _   _  ____ _  __  ____   _    ____ _  _______ ____
  |_   _|  _ \| | | |/ ___| |/ / |  _ \ / \  / ___| |/ / ____|  _ \
    | | | |_) | | | | |   | ' /  | |_) / _ \| |   | ' /|  _| | |_) |
    | | |  _ <| |_| | |___| . \  |  __/ ___ \ |___| . \| |___|  _ <
    |_| |_| \_\\___/ \____|_|\_\ |_| /_/   \_\____|_|\_\_____|_| \_\
-
-                     s p o n s o r e d   b y
 """
 
 
@@ -152,11 +152,7 @@ async def run_interactive():
 
     if not ip:
         ip = _ask("dLive IP address", "192.168.1.80")
-    target = _ask_choice("Connecting to:", [
-        ("mixrack", f"MixRack  (port {DLIVE_MIXRACK_PORT})"),
-        ("surface", f"Surface  (port {DLIVE_SURFACE_PORT})"),
-    ])
-    port = DLIVE_SURFACE_PORT if target == "surface" else DLIVE_MIXRACK_PORT
+    port = DLIVE_MIXRACK_PORT
     channel = _ask_int("MIDI channel", 1, 1, 16)
     ch_zero = channel - 1
 
@@ -224,9 +220,7 @@ async def run_test(args):
         datefmt="%H:%M:%S",
     )
 
-    port = args.dlive_port or (
-        DLIVE_SURFACE_PORT if args.target == "surface" else DLIVE_MIXRACK_PORT
-    )
+    port = args.dlive_port or DLIVE_MIXRACK_PORT
     channel = args.channel - 1  # 1-16 → 0-15
 
     conn = await _connect(args.dlive_ip, port)
@@ -284,11 +278,7 @@ def main():
     )
 
     parser.add_argument("--dlive-ip", help="IP address of the dLive")
-    parser.add_argument("--dlive-port", type=int, help="TCP port (default: auto by target)")
-    parser.add_argument(
-        "--target", choices=["mixrack", "surface"], default="mixrack",
-        help="MixRack (51325) or Surface (51328). Default: mixrack",
-    )
+    parser.add_argument("--dlive-port", type=int, help="TCP port (default: 51325)")
     parser.add_argument(
         "--channel", type=int, default=1, choices=range(1, 17), metavar="1-16",
         help="MIDI channel (default: 1)",

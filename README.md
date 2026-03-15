@@ -57,7 +57,7 @@ Everything is just `dlive <verb>`:
 ### Advanced (power-user flags)
 
 ```bash
-dlive run --dlive-ip 192.168.1.80 --target surface --log-midi --verbose
+dlive run --dlive-ip 192.168.1.80 --log-midi --verbose
 dlive run --list-midi-ports
 ```
 

@@ -61,13 +61,13 @@ def _c(code: str, text: str) -> str:
 
 
 TRUCK_PACKER_BANNER = r"""
+                     s p o n s o r e d   b y
+
   _____ ____  _   _  ____ _  __  ____   _    ____ _  _______ ____
  |_   _|  _ \| | | |/ ___| |/ / |  _ \ / \  / ___| |/ / ____|  _ \
    | | | |_) | | | | |   | ' /  | |_) / _ \| |   | ' /|  _| | |_) |
    | | |  _ <| |_| | |___| . \  |  __/ ___ \ |___| . \| |___|  _ <
    |_| |_| \_\\___/ \____|_|\_\ |_| /_/   \_\____|_|\_\_____|_| \_\
-
-                     s p o n s o r e d   b y
 """
 
 
@@ -299,23 +299,8 @@ def step_dlive_ip() -> str:
         fail(f"'{ip}' is not a valid IP address. Try again.")
 
 
-def step_target() -> tuple[str, int]:
-    step_header(2, "Connection Target")
-    target = ask_choice(
-        "What are you connecting to?",
-        [
-            ("mixrack", f"MixRack  (TCP port {DLIVE_MIXRACK_PORT})"),
-            ("surface", f"Surface  (TCP port {DLIVE_SURFACE_PORT})"),
-        ],
-        default=0,
-    )
-    port = DLIVE_SURFACE_PORT if target == "surface" else DLIVE_MIXRACK_PORT
-    ok(f"Target: {target} (port {port})")
-    return target, port
-
-
 def step_test_connection(host: str, port: int):
-    step_header(3, "Connection Test")
+    step_header(2, "Connection Test")
     print(f"  Testing TCP connection to {host}:{port}...")
     print()
     if test_tcp_connection(host, port):
@@ -330,7 +315,7 @@ def step_test_connection(host: str, port: int):
 
 
 def step_rtp_midi() -> tuple[str, Optional[str]]:
-    step_header(4, "RTP-MIDI Settings")
+    step_header(3, "RTP-MIDI Settings")
     session_name = ask("Session name (how this bridge appears on the network)",
                        default="dLive-MIDI-Bridge")
     print()
@@ -344,7 +329,7 @@ def step_rtp_midi() -> tuple[str, Optional[str]]:
 
 
 def step_local_midi() -> tuple[bool, Optional[str]]:
-    step_header(5, "Local MIDI (USB / Hardware)")
+    step_header(4, "Local MIDI (USB / Hardware)")
     ports = scan_midi_ports()
     if ports:
         print(f"  Found {len(ports)} MIDI input port(s):")
@@ -370,7 +355,7 @@ def step_local_midi() -> tuple[bool, Optional[str]]:
 
 
 def step_midi_options() -> tuple[Optional[int], bool]:
-    step_header(6, "MIDI Options")
+    step_header(5, "MIDI Options")
     if ask_yes_no("Filter to a specific MIDI channel?", default=False):
         while True:
             raw = ask("MIDI channel (1-16)")
@@ -400,7 +385,7 @@ def _default_config_path() -> Path:
 
 
 def step_write_config(config: dict) -> Path:
-    step_header(7, "Write Configuration")
+    step_header(6, "Write Configuration")
     default_path = _default_config_path()
     path_str = ask("Config file location", default=str(default_path))
     config_path = Path(path_str).expanduser()
@@ -559,7 +544,7 @@ def _install_systemd(config_path: Path):
 
 
 def step_install_service(config_path: Path):
-    step_header(8, "Install as System Service")
+    step_header(7, "Install as System Service")
     system = platform.system()
 
     if system == "Darwin":
@@ -596,16 +581,8 @@ def print_summary(config: dict, config_path: Path):
     if config.get("local_midi"):
         filt = config.get("local_midi_filter", "all devices")
         print(f"  Local MIDI:  enabled ({filt})")
-    print()
-    print("  Run manually:")
-    print(f"    dlive")
-    print()
-    print("  Other commands:")
-    print("    dlive status     Check if bridge is running")
-    print("    dlive test       Send test MIDI messages")
-    print("    dlive scan       Find dLive consoles on the network")
-    print("    dlive setup      Re-run this wizard")
-    print()
+    from .cli import print_help
+    print_help()
 
 
 # ── Main wizard entry point ──────────────────────────────────────────
@@ -615,7 +592,7 @@ def run_wizard():
     banner()
 
     dlive_ip = step_dlive_ip()
-    target, dlive_port = step_target()
+    dlive_port = DLIVE_MIXRACK_PORT
     step_test_connection(dlive_ip, dlive_port)
     session_name, filter_name = step_rtp_midi()
     enable_local_midi, local_midi_filter = step_local_midi()
