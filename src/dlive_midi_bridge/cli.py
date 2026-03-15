@@ -59,12 +59,12 @@ def _add_run_args(parser: argparse.ArgumentParser):
     rtp.add_argument(
         "--local-port",
         type=int,
-        default=5004,
+        default=None,
         help="Local UDP port for RTP-MIDI (default: 5004)",
     )
     rtp.add_argument(
         "--session-name",
-        default="dLive-MIDI-Bridge",
+        default=None,
         help="Name for the RTP-MIDI session (default: dLive-MIDI-Bridge)",
     )
     rtp.add_argument(
@@ -220,8 +220,8 @@ def _handle_run(args):
     else:
         dlive_port = DLIVE_MIXRACK_PORT
 
-    local_port = args.local_port or config.get("local_port", 5004)
-    session_name = args.session_name or config.get("session_name", "dLive-MIDI-Bridge")
+    local_port = args.local_port or config.get("local_port") or 5004
+    session_name = args.session_name or config.get("session_name") or "dLive-MIDI-Bridge"
     filter_name = args.filter_name or config.get("filter_name")
     log_midi = args.log_midi or config.get("log_midi", False)
     verbose = args.verbose or config.get("verbose", False)

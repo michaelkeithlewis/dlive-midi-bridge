@@ -16,7 +16,7 @@ Reference:
 import asyncio
 import logging
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +51,16 @@ class DLiveTCPConnection:
         host: str,
         port: int = DLIVE_MIXRACK_PORT,
         reconnect_interval: float = 3.0,
-        on_connected: Optional[callable] = None,
-        on_disconnected: Optional[callable] = None,
+        on_connected: Optional[Callable] = None,
+        on_disconnected: Optional[Callable] = None,
+        midi_callback: Optional[Callable[[bytes], None]] = None,
     ):
         self.host = host
         self.port = port
         self.reconnect_interval = reconnect_interval
         self.on_connected = on_connected
         self.on_disconnected = on_disconnected
+        self.midi_callback = midi_callback
 
         self._reader: Optional[asyncio.StreamReader] = None
         self._writer: Optional[asyncio.StreamWriter] = None
@@ -104,23 +106,76 @@ class DLiveTCPConnection:
             self._connected = False
             self._schedule_reconnect()
 
+    @staticmethod
+    def _midi_msg_length(status: int) -> int:
+        """Return expected data byte count for a given MIDI status byte."""
+        kind = status & 0xF0
+        if kind in (0x80, 0x90, 0xA0, 0xB0, 0xE0):
+            return 2  # two data bytes
+        if kind in (0xC0, 0xD0):
+            return 1  # one data byte
+        return 0  # system realtime / unknown
+
     async def _read_loop(self):
-        """Read incoming data from the dLive (mainly Active Sense keepalive)."""
+        """Read incoming data from the dLive and parse MIDI messages."""
+        midi_buf = bytearray()
+        expected_len = 0
         try:
             while self._connected and self._reader:
                 data = await self._reader.read(1024)
                 if not data:
-                    # Connection closed by remote
                     logger.warning("dLive closed the connection")
                     break
 
-                for byte in data:
-                    if byte == MIDI_ACTIVE_SENSE:
+                for byte_val in data:
+                    if byte_val == MIDI_ACTIVE_SENSE:
                         self._last_active_sense = time.monotonic()
                         self._stats["active_sense_received"] += 1
-                    else:
-                        # dLive might send other MIDI data (e.g., fader feedback)
-                        logger.debug(f"dLive rx: {byte:#04x}")
+                        continue
+
+                    # System realtime (0xF8-0xFF except 0xFE) — single byte, pass through
+                    if byte_val >= 0xF8:
+                        if self.midi_callback:
+                            self.midi_callback(bytes([byte_val]))
+                        continue
+
+                    # Status byte — start a new message
+                    if byte_val & 0x80:
+                        # If we had a partial message in the buffer, discard it
+                        if midi_buf:
+                            logger.debug(f"dLive rx: discarding partial [{midi_buf.hex(' ')}]")
+                        midi_buf = bytearray([byte_val])
+                        expected_len = self._midi_msg_length(byte_val)
+                        # SysEx (0xF0) accumulates until 0xF7
+                        if byte_val == 0xF0:
+                            expected_len = -1  # variable length
+                        elif expected_len == 0:
+                            # Single-byte message
+                            if self.midi_callback:
+                                self.midi_callback(bytes(midi_buf))
+                            midi_buf = bytearray()
+                        continue
+
+                    # Data byte
+                    if not midi_buf:
+                        continue  # stray data byte with no status
+
+                    midi_buf.append(byte_val)
+
+                    # SysEx: wait for 0xF7 terminator
+                    if midi_buf[0] == 0xF0:
+                        if byte_val == 0xF7:
+                            if self.midi_callback:
+                                self.midi_callback(bytes(midi_buf))
+                            midi_buf = bytearray()
+                        continue
+
+                    # Channel messages: check if we have all data bytes
+                    if len(midi_buf) - 1 >= expected_len:
+                        if self.midi_callback:
+                            self.midi_callback(bytes(midi_buf))
+                        logger.debug(f"dLive rx MIDI: [{bytes(midi_buf).hex(' ')}]")
+                        midi_buf = bytearray()
 
         except (ConnectionResetError, BrokenPipeError, OSError) as e:
             logger.warning(f"Read error from dLive: {e}")

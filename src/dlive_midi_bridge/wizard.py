@@ -60,8 +60,19 @@ def _c(code: str, text: str) -> str:
     return f"{code}{text}{RESET}" if USE_COLOR else text
 
 
+TRUCK_PACKER_BANNER = r"""
+  _____ ____  _   _  ____ _  __  ____   _    ____ _  _______ ____
+ |_   _|  _ \| | | |/ ___| |/ / |  _ \ / \  / ___| |/ / ____|  _ \
+   | | | |_) | | | | |   | ' /  | |_) / _ \| |   | ' /|  _| | |_) |
+   | | |  _ <| |_| | |___| . \  |  __/ ___ \ |___| . \| |___|  _ <
+   |_| |_| \_\\___/ \____|_|\_\ |_| /_/   \_\____|_|\_\_____|_| \_\
+
+                     s p o n s o r e d   b y
+"""
+
+
 def banner():
-    print()
+    print(TRUCK_PACKER_BANNER)
     print(_c(BOLD, "  ╔══════════════════════════════════════════════════╗"))
     print(_c(BOLD, "  ║       dLive MIDI Bridge — Setup Wizard          ║"))
     print(_c(BOLD, "  ╚══════════════════════════════════════════════════╝"))

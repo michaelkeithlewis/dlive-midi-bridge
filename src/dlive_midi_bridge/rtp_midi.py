@@ -231,6 +231,48 @@ class AppleMIDISession:
 
         return bytes(result)
 
+    # ── RTP-MIDI send ──────────────────────────────────────────────
+
+    def _build_rtp_midi_packet(self, midi_data: bytes) -> bytes:
+        """Wrap raw MIDI bytes in an RTP packet for sending to a peer."""
+        self._sequence = (self._sequence + 1) & 0xFFFF
+        timestamp = self._now_ts() & 0xFFFFFFFF
+
+        # RTP header: V=2, P=0, X=0, CC=0, M=1, PT=97
+        rtp_header = struct.pack(
+            ">BBHII",
+            (RTP_VERSION << 6) | 0,  # V=2, P=0, X=0, CC=0
+            0x80 | RTP_MIDI_PAYLOAD_TYPE,  # M=1, PT=97
+            self._sequence,
+            timestamp,
+            self.ssrc,
+        )
+
+        # MIDI command section: short header (B=0, J=0, Z=0, P=0, len=N)
+        midi_len = len(midi_data)
+        if midi_len > 15:
+            # Long header: B=1
+            midi_header = bytes([
+                0x80 | ((midi_len >> 8) & 0x0F),
+                midi_len & 0xFF,
+            ])
+        else:
+            midi_header = bytes([midi_len & 0x0F])
+
+        return rtp_header + midi_header + midi_data
+
+    def send_midi(self, data: bytes):
+        """Send MIDI bytes to the connected peer via RTP."""
+        if not self.connected or not self._data_transport or not self.peer_addr:
+            return
+        packet = self._build_rtp_midi_packet(data)
+        data_addr = (self.peer_addr[0], self.peer_addr[1] + 1)
+        try:
+            self._data_transport.sendto(packet, data_addr)
+            logger.debug(f"RTP-MIDI tx [{len(data)} bytes]: {data.hex(' ')}")
+        except Exception as e:
+            logger.warning(f"RTP-MIDI send failed: {e}")
+
     # ── UDP protocol handlers ────────────────────────────────────────
 
     class _ControlProtocol(asyncio.DatagramProtocol):
@@ -520,6 +562,11 @@ class RTPMIDIReceiver:
             filter_name=self.filter_name,
         )
         self._browser.start()
+
+    def send_midi(self, data: bytes):
+        """Send MIDI bytes to all connected RTP-MIDI peers."""
+        for session in self._sessions.values():
+            session.send_midi(data)
 
     async def stop(self):
         """Stop all sessions and browsing."""

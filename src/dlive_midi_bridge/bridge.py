@@ -1,11 +1,12 @@
 """
-The bridge: glues RTP-MIDI input to dLive TCP output.
+Bidirectional MIDI bridge: RTP-MIDI <-> dLive TCP.
 
 This is the core orchestrator that:
   1. Starts the RTP-MIDI receiver (Bonjour discovery + session handler)
   2. Connects to the dLive via TCP
-  3. Pipes every received MIDI byte from (1) → (2)
-  4. Provides status/stats for monitoring
+  3. Pipes MIDI from network/USB → dLive TCP (forward path)
+  4. Pipes MIDI from dLive TCP → RTP-MIDI network (return path)
+  5. Provides status/stats for monitoring
 """
 
 import asyncio
@@ -60,6 +61,7 @@ class MIDIBridge:
         self._local_midi: Optional[LocalMIDIInput] = None
         self._running = False
         self._midi_count = 0
+        self._midi_return_count = 0
 
     def _on_midi_received(self, data: bytes):
         """
@@ -126,6 +128,24 @@ class MIDIBridge:
         else:
             logger.info(f"MIDI: [{hex_str}]")
 
+    def _on_dlive_midi_received(self, data: bytes):
+        """
+        Callback: MIDI bytes received from dLive TCP → forward to RTP-MIDI peers.
+
+        This is the return path: dLive scene feedback, fader moves, etc.
+        sent back to the network so other devices can see them.
+        """
+        if not data:
+            return
+
+        self._midi_return_count += 1
+
+        if self.log_midi:
+            self._log_midi_message(data)
+
+        if self._receiver:
+            self._receiver.send_midi(data)
+
     def _on_dlive_connected(self):
         logger.info("=== dLive connection ACTIVE — bridge is live ===")
 
@@ -150,12 +170,13 @@ class MIDIBridge:
             logger.info(f"  Local MIDI:    enabled (filter: {filt})")
         logger.info("=" * 60)
 
-        # Start dLive TCP connection
+        # Start dLive TCP connection (bidirectional)
         self._dlive = DLiveTCPConnection(
             host=self.dlive_host,
             port=self.dlive_port,
             on_connected=self._on_dlive_connected,
             on_disconnected=self._on_dlive_disconnected,
+            midi_callback=self._on_dlive_midi_received,
         )
         await self._dlive.connect()
 
@@ -190,7 +211,8 @@ class MIDIBridge:
             stats = self._dlive.stats if self._dlive else {}
             logger.info(
                 f"Status: dLive={dlive_status} | "
-                f"MIDI msgs forwarded={self._midi_count} | "
+                f"MIDI in→dLive={self._midi_count} | "
+                f"dLive→network={self._midi_return_count} | "
                 f"TCP bytes sent={stats.get('bytes_sent', 0)} | "
                 f"Active Sense rx={stats.get('active_sense_received', 0)}"
             )
