@@ -31,6 +31,7 @@ dependencies = [
 dev = ["pytest", "black", "ruff"]
 
 [project.scripts]
+dlive = "dlive_midi_bridge.cli:main"
 dlive-midi-bridge = "dlive_midi_bridge.cli:main"
 dlive-test-send = "dlive_midi_bridge.test_send:main"
 

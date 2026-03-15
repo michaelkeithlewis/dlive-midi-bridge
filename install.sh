@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────
-# dlive-midi-bridge — Universal Installer
+# dLive MIDI Bridge — Universal Installer
 #
 # One-liner:
 #   curl -sSL https://raw.githubusercontent.com/michaelkeithlewis/dlive-midi-bridge/main/install.sh | bash
@@ -67,10 +67,8 @@ if [[ "$PLATFORM" == "linux" ]]; then
     command -v git &>/dev/null || missing+=(git)
     $PYTHON -c "import venv" 2>/dev/null || missing+=(python3-venv)
 
-    # Check for ALSA dev headers (needed to build python-rtmidi)
     if ! dpkg -s libasound2-dev &>/dev/null 2>&1 && \
        ! dpkg -s libasound-dev &>/dev/null 2>&1; then
-        # Try the newer package name first, fall back to legacy
         if apt-cache show libasound2-dev &>/dev/null 2>&1; then
             missing+=(libasound2-dev)
         else
@@ -108,17 +106,17 @@ fi
 echo "  Creating virtual environment..."
 $PYTHON -m venv "$INSTALL_DIR/.venv"
 
-echo "  Installing dlive-midi-bridge..."
+echo "  Installing..."
 "$INSTALL_DIR/.venv/bin/pip" install --quiet --upgrade pip
 "$INSTALL_DIR/.venv/bin/pip" install --quiet "$INSTALL_DIR"
 
 # ── Add to PATH ──────────────────────────────────────────────────────
 
 mkdir -p "$BIN_DIR"
+ln -sf "$INSTALL_DIR/.venv/bin/dlive" "$BIN_DIR/dlive"
 ln -sf "$INSTALL_DIR/.venv/bin/dlive-midi-bridge" "$BIN_DIR/dlive-midi-bridge"
 ln -sf "$INSTALL_DIR/.venv/bin/dlive-test-send" "$BIN_DIR/dlive-test-send"
 
-# Check if BIN_DIR is on PATH
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     echo ""
     echo "  Adding $BIN_DIR to your PATH..."
@@ -147,14 +145,12 @@ echo "    Installation complete!"
 echo "  ══════════════════════════════════════════════════════"
 echo ""
 
-# When running via curl|bash, stdin is the pipe — not the keyboard.
-# Redirect from /dev/tty so the interactive wizard can read input.
 if [[ -t 0 ]]; then
     echo "  Launching setup wizard..."
     echo ""
-    "$BIN_DIR/dlive-midi-bridge" setup
+    "$BIN_DIR/dlive" setup
 else
     echo "  Launching setup wizard..."
     echo ""
-    "$BIN_DIR/dlive-midi-bridge" setup < /dev/tty
+    "$BIN_DIR/dlive" setup < /dev/tty
 fi

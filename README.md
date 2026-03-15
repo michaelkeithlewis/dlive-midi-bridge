@@ -2,16 +2,16 @@
 
 **RTP-MIDI → Allen & Heath dLive TCP bridge.**
 
-Receives Network MIDI (Apple Network MIDI / Bonjour / RTP-MIDI) and forwards raw MIDI bytes to an Allen & Heath dLive console over TCP. Also supports USB MIDI controllers plugged directly into the host. Eliminates the need for a Mac Mini running MIDI Pipe + A&H MIDI Control app in your FOH rack.
+Receives Network MIDI (Apple Network MIDI / Bonjour / RTP-MIDI) and forwards raw MIDI bytes to an Allen & Heath dLive console over TCP. Also bridges MIDI *back* from the dLive into the network session. Supports USB MIDI controllers plugged directly into the host.
 
 Designed to run on a Raspberry Pi velcroed to the back of your dLive.
 
 ## Signal Flow
 
 ```
-Tracks Rig ──(RTP-MIDI/Bonjour)──┐
-                                  ├──→ [this bridge] ──(TCP:51325)──→ dLive MixRack
-USB MIDI controller (local) ─────┘
+Tracks Rig ──(RTP-MIDI/Bonjour)──┐                    ┌──→ Network MIDI peers
+                                  ├──→ dLive MixRack ──┤
+USB MIDI controller (local) ─────┘    (TCP:51325)      └──→ SuperRack, etc.
 ```
 
 ## Install (one command)
@@ -20,26 +20,15 @@ USB MIDI controller (local) ─────┘
 curl -sSL https://raw.githubusercontent.com/michaelkeithlewis/dlive-midi-bridge/main/install.sh | bash
 ```
 
-This works on **Mac** and **Linux** (including Raspberry Pi). It clones the repo, installs everything into a virtual environment, and launches the interactive setup wizard.
-
-The wizard walks you through:
-1. dLive IP address (with a connection test)
-2. MixRack or Surface
-3. RTP-MIDI session settings
-4. Local MIDI (scans for USB controllers)
-5. MIDI channel filter and logging
-6. Writing your config file
-7. Installing as a system service (launchd on Mac, systemd on Linux)
+This works on **Mac** and **Linux** (including Raspberry Pi). It clones the repo, installs everything, and launches the interactive setup wizard.
 
 To re-run the wizard later:
 
 ```bash
-dlive-midi-bridge setup
+dlive setup
 ```
 
 ## Manual Install
-
-If you prefer to do it yourself:
 
 ```bash
 git clone https://github.com/michaelkeithlewis/dlive-midi-bridge.git
@@ -47,39 +36,41 @@ cd dlive-midi-bridge
 python3 -m venv .venv
 source .venv/bin/activate
 pip install .
-dlive-midi-bridge setup
+dlive setup
 ```
 
-## Usage
+## Commands
+
+Everything is just `dlive <verb>`:
+
+| Command           | What it does                                   |
+|-------------------|------------------------------------------------|
+| `dlive`           | Run the bridge (auto-finds your config)        |
+| `dlive setup`     | Interactive setup wizard                       |
+| `dlive scan`      | Find dLive consoles on the network             |
+| `dlive test`      | Send test MIDI messages (interactive)          |
+| `dlive start`     | Start the background service                   |
+| `dlive stop`      | Stop the background service                    |
+| `dlive restart`   | Restart the background service                 |
+| `dlive status`    | Check if the bridge is running + show config   |
+
+### Advanced (power-user flags)
 
 ```bash
-# Run the bridge
-dlive-midi-bridge run --dlive-ip 192.168.1.80
-dlive-midi-bridge run --config ~/.config/dlive-midi-bridge/config.yaml
-
-# Run with all the options
-dlive-midi-bridge run --dlive-ip 192.168.1.80 \
-    --target surface \
-    --filter "Tracks" \
-    --midi-channel 1 \
-    --local-midi \
-    --log-midi --verbose
-
-# List USB MIDI devices
-dlive-midi-bridge run --list-midi-ports
-
-# Test without RTP-MIDI (send messages directly to dLive)
-dlive-test-send --dlive-ip 192.168.1.80 --program 5
-dlive-test-send --dlive-ip 192.168.1.80 --sweep
+dlive run --dlive-ip 192.168.1.80 --target surface --log-midi --verbose
+dlive run --list-midi-ports
 ```
+
+The old `dlive-midi-bridge` and `dlive-test-send` commands still work for backwards compatibility.
 
 ## Configuration
 
-See `config/config.example.yaml` for all options. The setup wizard writes this for you, or copy it manually:
+The setup wizard writes your config to:
 
 - Mac: `~/.config/dlive-midi-bridge/config.yaml`
-- Pi/Linux (root): `/etc/dlive-midi-bridge/config.yaml`
-- Pi/Linux (user): `~/.config/dlive-midi-bridge/config.yaml`
+- Pi/Linux: `~/.config/dlive-midi-bridge/config.yaml` (or `/etc/dlive-midi-bridge/config.yaml` for root)
+
+See `config/config.example.yaml` for all options.
 
 ## dLive TCP Protocol
 
@@ -93,13 +84,10 @@ The dLive accepts raw MIDI bytes on TCP with no framing. The console sends `0xFE
 ## Uninstall
 
 ```bash
-pip uninstall dlive-midi-bridge
-rm -rf ~/.local/share/dlive-midi-bridge
+dlive uninstall
 ```
 
-To remove the system service:
-- Mac: `launchctl unload ~/Library/LaunchAgents/com.backlinelogic.dlive-midi-bridge.plist`
-- Linux: `sudo systemctl disable --now dlive-midi-bridge`
+Stops the service, removes the config, symlinks, install directory, and logs. One command, done.
 
 ## Requirements
 

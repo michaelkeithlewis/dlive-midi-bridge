@@ -2,15 +2,20 @@
 CLI entry point for dlive-midi-bridge.
 
 Usage:
-    dlive-midi-bridge setup                              # interactive wizard
-    dlive-midi-bridge run --dlive-ip 192.168.1.80        # run the bridge
-    dlive-midi-bridge run --config config.yaml           # run from config
-    dlive-midi-bridge --dlive-ip 192.168.1.80            # shorthand (implies run)
+    dlive                     # auto-run (config) or auto-setup (no config)
+    dlive setup               # interactive wizard
+    dlive scan                # find dLive consoles on the network
+    dlive test                # interactive MIDI test sender
+    dlive start / stop        # control the background service
+    dlive status              # check if bridge is running
 """
 
 import argparse
 import asyncio
 import logging
+import os
+import platform
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -21,160 +26,30 @@ from . import __version__
 from .dlive_tcp import DLIVE_MIXRACK_PORT, DLIVE_SURFACE_PORT
 
 
-def load_config(path: str) -> dict:
-    """Load configuration from a YAML file."""
-    config_path = Path(path)
-    if not config_path.exists():
-        print(f"Config file not found: {path}", file=sys.stderr)
-        sys.exit(1)
+# ── Config auto-discovery ────────────────────────────────────────────
 
-    with open(config_path) as f:
+CONFIG_SEARCH_PATHS = [
+    Path.home() / ".config" / "dlive-midi-bridge" / "config.yaml",
+    Path("/etc/dlive-midi-bridge/config.yaml"),
+]
+
+
+def _find_config() -> Optional[Path]:
+    for path in CONFIG_SEARCH_PATHS:
+        if path.exists():
+            return path
+    return None
+
+
+def _load_config(path: Path) -> dict:
+    with open(path) as f:
         config = yaml.safe_load(f)
-
     return config or {}
 
 
-def _add_run_args(parser: argparse.ArgumentParser):
-    """Add all run-mode arguments to a parser."""
-    # Connection
-    conn = parser.add_argument_group("dLive connection")
-    conn.add_argument(
-        "--dlive-ip",
-        help="IP address of the dLive MixRack or Surface",
-    )
-    conn.add_argument(
-        "--dlive-port",
-        type=int,
-        help=f"TCP port (default: {DLIVE_MIXRACK_PORT} for MixRack)",
-    )
-    conn.add_argument(
-        "--target",
-        choices=["mixrack", "surface"],
-        default="mixrack",
-        help="Connect to MixRack (51325) or Surface (51328). Default: mixrack",
-    )
+# ── Logging ──────────────────────────────────────────────────────────
 
-    # RTP-MIDI
-    rtp = parser.add_argument_group("RTP-MIDI settings")
-    rtp.add_argument(
-        "--local-port",
-        type=int,
-        default=None,
-        help="Local UDP port for RTP-MIDI (default: 5004)",
-    )
-    rtp.add_argument(
-        "--session-name",
-        default=None,
-        help="Name for the RTP-MIDI session (default: dLive-MIDI-Bridge)",
-    )
-    rtp.add_argument(
-        "--filter",
-        dest="filter_name",
-        help="Only connect to RTP-MIDI peers whose name contains this string",
-    )
-
-    # MIDI
-    midi = parser.add_argument_group("MIDI options")
-    midi.add_argument(
-        "--midi-channel",
-        type=int,
-        choices=range(1, 17),
-        metavar="1-16",
-        help="Only forward messages on this MIDI channel (default: all)",
-    )
-
-    # Local MIDI
-    local = parser.add_argument_group("local MIDI (USB/hardware)")
-    local.add_argument(
-        "--local-midi",
-        action="store_true",
-        help="Enable local MIDI input (USB controllers, hardware interfaces)",
-    )
-    local.add_argument(
-        "--local-midi-filter",
-        metavar="NAME",
-        help="Only open local MIDI ports whose name contains this string",
-    )
-    local.add_argument(
-        "--list-midi-ports",
-        action="store_true",
-        help="List available local MIDI input ports and exit",
-    )
-
-    # Logging & config
-    gen = parser.add_argument_group("general")
-    gen.add_argument(
-        "--config",
-        help="Path to YAML config file",
-    )
-    gen.add_argument(
-        "--log-midi",
-        action="store_true",
-        help="Log every MIDI message (verbose, useful for debugging)",
-    )
-    gen.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        help="Enable debug logging",
-    )
-    gen.add_argument(
-        "-q", "--quiet",
-        action="store_true",
-        help="Suppress all output except errors",
-    )
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="dlive-midi-bridge",
-        description=(
-            "RTP-MIDI to Allen & Heath dLive TCP bridge.\n"
-            "Receives Network MIDI (Bonjour) and forwards to a dLive console."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  %(prog)s setup                                  # interactive wizard\n"
-            "  %(prog)s run --dlive-ip 192.168.1.80            # run the bridge\n"
-            "  %(prog)s run --config /path/to/config.yaml      # run from config\n"
-            "  %(prog)s --dlive-ip 192.168.1.80 --log-midi     # shorthand for run\n"
-        ),
-    )
-
-    parser.add_argument(
-        "--version", action="version", version=f"%(prog)s {__version__}"
-    )
-
-    subparsers = parser.add_subparsers(dest="command")
-
-    # -- setup subcommand --
-    subparsers.add_parser(
-        "setup",
-        help="Interactive setup wizard — configure, test, and install",
-    )
-
-    # -- scan subcommand --
-    subparsers.add_parser(
-        "scan",
-        help="Scan the local network for dLive consoles",
-    )
-
-    # -- run subcommand --
-    run_parser = subparsers.add_parser(
-        "run",
-        help="Run the MIDI bridge",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    _add_run_args(run_parser)
-
-    # Also add run args to the top-level parser so bare
-    # `dlive-midi-bridge --dlive-ip ...` still works (no subcommand = run)
-    _add_run_args(parser)
-
-    return parser
-
-
-def setup_logging(verbose: bool = False, quiet: bool = False):
+def _setup_logging(verbose: bool = False, quiet: bool = False):
     level = logging.DEBUG if verbose else (logging.ERROR if quiet else logging.INFO)
     logging.basicConfig(
         level=level,
@@ -183,85 +58,186 @@ def setup_logging(verbose: bool = False, quiet: bool = False):
     )
 
 
-def _handle_run(args):
-    """Run the MIDI bridge (the main operation)."""
-    from .bridge import MIDIBridge
+# ── Service control ──────────────────────────────────────────────────
 
-    # Handle --list-midi-ports before anything else
-    if getattr(args, "list_midi_ports", False):
-        from .local_midi import LocalMIDIInput
-        listener = LocalMIDIInput(midi_callback=lambda _: None)
-        ports = listener.list_ports()
-        if ports:
-            print("Available local MIDI input ports:")
-            for i, name in enumerate(ports):
-                print(f"  [{i}] {name}")
-        else:
-            print("No local MIDI input ports found.")
-            print("Plug in a USB MIDI controller and try again.")
-        sys.exit(0)
+LAUNCHD_LABEL = "com.backlinelogic.dlive-midi-bridge"
+SYSTEMD_UNIT = "dlive-midi-bridge"
 
-    # Load config file if specified
-    config = {}
-    if args.config:
-        config = load_config(args.config)
 
-    # CLI args override config file
-    dlive_ip = args.dlive_ip or config.get("dlive_ip")
-    if not dlive_ip:
-        print(
-            "Error: --dlive-ip is required (or set dlive_ip in config file)\n"
-            "Hint: run 'dlive-midi-bridge setup' for interactive configuration",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+def _is_mac() -> bool:
+    return platform.system() == "Darwin"
 
-    # Determine port
-    if args.dlive_port:
-        dlive_port = args.dlive_port
-    elif "dlive_port" in config:
-        dlive_port = config["dlive_port"]
-    elif args.target == "surface":
-        dlive_port = DLIVE_SURFACE_PORT
+
+def _is_linux() -> bool:
+    return platform.system() == "Linux"
+
+
+def _plist_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+
+
+def _service_installed() -> bool:
+    if _is_mac():
+        return _plist_path().exists()
+    if _is_linux():
+        return Path(f"/etc/systemd/system/{SYSTEMD_UNIT}.service").exists()
+    return False
+
+
+def _handle_start():
+    if _is_mac():
+        plist = _plist_path()
+        if not plist.exists():
+            print("Service not installed. Run 'dlive setup' first.")
+            sys.exit(1)
+        subprocess.run(["launchctl", "load", str(plist)], check=False)
+        print("Bridge started.")
+        print(f"Logs: tail -f ~/Library/Logs/dlive-midi-bridge/dlive-midi-bridge.log")
+    elif _is_linux():
+        subprocess.run(["sudo", "systemctl", "start", SYSTEMD_UNIT], check=False)
+        print("Bridge started.")
+        print("Logs: journalctl -u dlive-midi-bridge -f")
     else:
-        dlive_port = DLIVE_MIXRACK_PORT
+        print(f"Service control not supported on {platform.system()}.")
 
-    local_port = args.local_port or config.get("local_port") or 5004
-    session_name = args.session_name or config.get("session_name") or "dLive-MIDI-Bridge"
-    filter_name = args.filter_name or config.get("filter_name")
-    log_midi = args.log_midi or config.get("log_midi", False)
-    verbose = args.verbose or config.get("verbose", False)
-    quiet = args.quiet or config.get("quiet", False)
 
-    midi_channel = args.midi_channel or config.get("midi_channel")
-    if midi_channel is not None:
-        midi_channel = midi_channel - 1  # convert 1-16 → 0-15
+def _handle_stop():
+    if _is_mac():
+        plist = _plist_path()
+        if plist.exists():
+            subprocess.run(["launchctl", "unload", str(plist)], check=False)
+        print("Bridge stopped.")
+    elif _is_linux():
+        subprocess.run(["sudo", "systemctl", "stop", SYSTEMD_UNIT], check=False)
+        print("Bridge stopped.")
+    else:
+        print(f"Service control not supported on {platform.system()}.")
 
-    enable_local_midi = args.local_midi or config.get("local_midi", False)
-    local_midi_filter = args.local_midi_filter or config.get("local_midi_filter")
 
-    setup_logging(verbose=verbose, quiet=quiet)
+def _handle_restart():
+    _handle_stop()
+    _handle_start()
 
-    bridge = MIDIBridge(
-        dlive_host=dlive_ip,
-        dlive_port=dlive_port,
-        local_port=local_port,
-        session_name=session_name,
-        filter_name=filter_name,
-        midi_channel=midi_channel,
-        log_midi=log_midi,
-        enable_local_midi=enable_local_midi,
-        local_midi_filter=local_midi_filter,
-    )
+
+def _handle_status():
+    config_path = _find_config()
+    if config_path:
+        config = _load_config(config_path)
+        print(f"Config:    {config_path}")
+        print(f"dLive IP:  {config.get('dlive_ip', 'not set')}")
+        print(f"Session:   {config.get('session_name', 'dLive-MIDI-Bridge')}")
+    else:
+        print("Config:    not found (run 'dlive setup')")
+
+    installed = _service_installed()
+    print(f"Service:   {'installed' if installed else 'not installed'}")
+
+    if _is_mac() and installed:
+        result = subprocess.run(
+            ["launchctl", "list", LAUNCHD_LABEL],
+            capture_output=True, text=True,
+        )
+        running = result.returncode == 0
+        print(f"Running:   {'yes' if running else 'no'}")
+        if running:
+            print(f"Logs:      ~/Library/Logs/dlive-midi-bridge/dlive-midi-bridge.log")
+    elif _is_linux() and installed:
+        result = subprocess.run(
+            ["systemctl", "is-active", SYSTEMD_UNIT],
+            capture_output=True, text=True,
+        )
+        state = result.stdout.strip()
+        print(f"Running:   {state}")
+        if state == "active":
+            print("Logs:      journalctl -u dlive-midi-bridge -f")
+
+
+# ── Uninstall ────────────────────────────────────────────────────────
+
+INSTALL_DIR = Path.home() / ".local" / "share" / "dlive-midi-bridge"
+BIN_DIR = Path.home() / ".local" / "bin"
+
+
+def _handle_uninstall():
+    print()
+    print("  dLive MIDI Bridge — Uninstall")
+    print("  ─────────────────────────────")
+    print()
 
     try:
-        asyncio.run(bridge.run_forever())
-    except KeyboardInterrupt:
-        pass
+        confirm = input("  Are you sure? This removes everything. (y/N): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Cancelled.")
+        return
+    if confirm not in ("y", "yes"):
+        print("  Cancelled.")
+        return
 
+    print()
+    removed = []
+
+    # 1. Stop the service
+    if _service_installed():
+        print("  Stopping service...")
+        if _is_mac():
+            plist = _plist_path()
+            subprocess.run(["launchctl", "unload", str(plist)], capture_output=True)
+            plist.unlink(missing_ok=True)
+            removed.append(f"  - Service plist: {plist}")
+        elif _is_linux():
+            subprocess.run(["sudo", "systemctl", "stop", SYSTEMD_UNIT], capture_output=True)
+            subprocess.run(["sudo", "systemctl", "disable", SYSTEMD_UNIT], capture_output=True)
+            svc = Path(f"/etc/systemd/system/{SYSTEMD_UNIT}.service")
+            if svc.exists():
+                subprocess.run(["sudo", "rm", str(svc)], capture_output=True)
+                subprocess.run(["sudo", "systemctl", "daemon-reload"], capture_output=True)
+            removed.append(f"  - systemd service: {svc}")
+
+    # 2. Remove config
+    for config_path in CONFIG_SEARCH_PATHS:
+        if config_path.exists():
+            config_path.unlink()
+            removed.append(f"  - Config: {config_path}")
+            config_dir = config_path.parent
+            if config_dir.exists() and not any(config_dir.iterdir()):
+                config_dir.rmdir()
+
+    # 3. Remove symlinks
+    for name in ("dlive", "dlive-midi-bridge", "dlive-test-send"):
+        link = BIN_DIR / name
+        if link.exists() or link.is_symlink():
+            link.unlink()
+            removed.append(f"  - Symlink: {link}")
+
+    # 4. Remove install directory
+    if INSTALL_DIR.exists():
+        import shutil
+        shutil.rmtree(INSTALL_DIR)
+        removed.append(f"  - Install dir: {INSTALL_DIR}")
+
+    # 5. Remove log directory (macOS)
+    log_dir = Path.home() / "Library" / "Logs" / "dlive-midi-bridge"
+    if log_dir.exists():
+        import shutil
+        shutil.rmtree(log_dir)
+        removed.append(f"  - Logs: {log_dir}")
+
+    if removed:
+        print()
+        print("  Removed:")
+        for item in removed:
+            print(item)
+    else:
+        print("  Nothing to remove — already clean.")
+
+    print()
+    print("  Uninstall complete.")
+    print()
+
+
+# ── Scan ─────────────────────────────────────────────────────────────
 
 def _handle_scan():
-    """Scan the local network for dLive consoles."""
     from .wizard import scan_for_dlive, _get_local_subnet
 
     subnet = _get_local_subnet()
@@ -288,24 +264,197 @@ def _handle_scan():
         print("Make sure the console is powered on and on the same network.\n")
 
 
+# ── Run bridge ───────────────────────────────────────────────────────
+
+def _handle_run(args):
+    from .bridge import MIDIBridge
+
+    if getattr(args, "list_midi_ports", False):
+        from .local_midi import LocalMIDIInput
+        listener = LocalMIDIInput(midi_callback=lambda _: None)
+        ports = listener.list_ports()
+        if ports:
+            print("Available local MIDI input ports:")
+            for i, name in enumerate(ports):
+                print(f"  [{i}] {name}")
+        else:
+            print("No local MIDI input ports found.")
+        sys.exit(0)
+
+    config = {}
+    config_path = None
+
+    if getattr(args, "config", None):
+        config_path = Path(args.config)
+        if not config_path.exists():
+            print(f"Config file not found: {args.config}", file=sys.stderr)
+            sys.exit(1)
+        config = _load_config(config_path)
+    else:
+        config_path = _find_config()
+        if config_path:
+            config = _load_config(config_path)
+
+    dlive_ip = getattr(args, "dlive_ip", None) or config.get("dlive_ip")
+    if not dlive_ip:
+        print(
+            "No config found and no --dlive-ip given.\n"
+            "Run 'dlive setup' to configure, or pass --dlive-ip.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    dlive_port_arg = getattr(args, "dlive_port", None)
+    target = getattr(args, "target", "mixrack")
+    if dlive_port_arg:
+        dlive_port = dlive_port_arg
+    elif "dlive_port" in config:
+        dlive_port = config["dlive_port"]
+    elif target == "surface":
+        dlive_port = DLIVE_SURFACE_PORT
+    else:
+        dlive_port = DLIVE_MIXRACK_PORT
+
+    local_port = getattr(args, "local_port", None) or config.get("local_port") or 5004
+    session_name = getattr(args, "session_name", None) or config.get("session_name") or "dLive-MIDI-Bridge"
+    filter_name = getattr(args, "filter_name", None) or config.get("filter_name")
+    log_midi = getattr(args, "log_midi", False) or config.get("log_midi", False)
+    verbose = getattr(args, "verbose", False) or config.get("verbose", False)
+    quiet = getattr(args, "quiet", False) or config.get("quiet", False)
+
+    midi_channel = getattr(args, "midi_channel", None) or config.get("midi_channel")
+    if midi_channel is not None:
+        midi_channel = midi_channel - 1
+
+    enable_local_midi = getattr(args, "local_midi", False) or config.get("local_midi", False)
+    local_midi_filter = getattr(args, "local_midi_filter", None) or config.get("local_midi_filter")
+
+    _setup_logging(verbose=verbose, quiet=quiet)
+
+    bridge = MIDIBridge(
+        dlive_host=dlive_ip,
+        dlive_port=dlive_port,
+        local_port=local_port,
+        session_name=session_name,
+        filter_name=filter_name,
+        midi_channel=midi_channel,
+        log_midi=log_midi,
+        enable_local_midi=enable_local_midi,
+        local_midi_filter=local_midi_filter,
+    )
+
+    try:
+        asyncio.run(bridge.run_forever())
+    except KeyboardInterrupt:
+        pass
+
+
+# ── Parser & main ────────────────────────────────────────────────────
+
+def _add_run_args(parser: argparse.ArgumentParser):
+    conn = parser.add_argument_group("dLive connection")
+    conn.add_argument("--dlive-ip", help="IP address of the dLive")
+    conn.add_argument("--dlive-port", type=int, help="TCP port")
+    conn.add_argument("--target", choices=["mixrack", "surface"], default="mixrack")
+
+    rtp = parser.add_argument_group("RTP-MIDI")
+    rtp.add_argument("--local-port", type=int, default=None)
+    rtp.add_argument("--session-name", default=None)
+    rtp.add_argument("--filter", dest="filter_name")
+
+    midi = parser.add_argument_group("MIDI")
+    midi.add_argument("--midi-channel", type=int, choices=range(1, 17), metavar="1-16")
+    midi.add_argument("--local-midi", action="store_true")
+    midi.add_argument("--local-midi-filter", metavar="NAME")
+    midi.add_argument("--list-midi-ports", action="store_true")
+
+    gen = parser.add_argument_group("general")
+    gen.add_argument("--config", help="Path to config file")
+    gen.add_argument("--log-midi", action="store_true")
+    gen.add_argument("-v", "--verbose", action="store_true")
+    gen.add_argument("-q", "--quiet", action="store_true")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="dlive",
+        description="Allen & Heath dLive MIDI Bridge",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Commands:\n"
+            "  dlive              Run the bridge (auto-finds config)\n"
+            "  dlive setup        Interactive setup wizard\n"
+            "  dlive scan         Find dLive consoles on the network\n"
+            "  dlive test         Send test MIDI messages\n"
+            "  dlive start        Start the background service\n"
+            "  dlive stop         Stop the background service\n"
+            "  dlive restart      Restart the background service\n"
+            "  dlive status       Check if the bridge is running\n"
+            "  dlive uninstall    Remove everything\n"
+        ),
+    )
+
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+
+    subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser("setup", help="Interactive setup wizard")
+    subparsers.add_parser("scan", help="Find dLive consoles on the network")
+    subparsers.add_parser("test", help="Send test MIDI messages")
+    subparsers.add_parser("start", help="Start the background service")
+    subparsers.add_parser("stop", help="Stop the background service")
+    subparsers.add_parser("restart", help="Restart the background service")
+    subparsers.add_parser("status", help="Check if bridge is running")
+    subparsers.add_parser("uninstall", help="Remove everything")
+
+    run_parser = subparsers.add_parser("run", help="Run the bridge (foreground)")
+    _add_run_args(run_parser)
+
+    _add_run_args(parser)
+
+    return parser
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.command == "setup":
+    cmd = args.command
+
+    if cmd == "setup":
         from .wizard import run_wizard
         run_wizard()
-    elif args.command == "scan":
+    elif cmd == "scan":
         _handle_scan()
-    elif args.command == "run":
+    elif cmd == "test":
+        from .test_send import run_interactive
+        try:
+            asyncio.run(run_interactive())
+        except KeyboardInterrupt:
+            print("\n  Bye!")
+    elif cmd == "start":
+        _handle_start()
+    elif cmd == "stop":
+        _handle_stop()
+    elif cmd == "restart":
+        _handle_restart()
+    elif cmd == "status":
+        _handle_status()
+    elif cmd == "uninstall":
+        _handle_uninstall()
+    elif cmd == "run":
         _handle_run(args)
     else:
-        # No subcommand — if they passed run-style flags, treat as run.
-        # Otherwise show help.
+        # No subcommand: if flags given, run. If config exists, run.
+        # If nothing, launch setup.
         if args.dlive_ip or args.config or getattr(args, "list_midi_ports", False):
             _handle_run(args)
+        elif _find_config():
+            _handle_run(args)
         else:
-            parser.print_help()
+            print("No config found. Let's set things up!\n")
+            from .wizard import run_wizard
+            run_wizard()
 
 
 if __name__ == "__main__":
