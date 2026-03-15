@@ -119,7 +119,39 @@ async def run_interactive():
     print(TRUCK_PACKER_BANNER)
     print("  ── dLive Test Sender ─────────────────────────────\n")
 
-    ip = _ask("dLive IP address", "192.168.1.80")
+    # Offer network scan
+    ip = None
+    try:
+        from .wizard import scan_for_dlive, _get_local_subnet
+        subnet = _get_local_subnet()
+        if subnet:
+            scan = _ask("Scan network for dLive? (Y/n)", "Y").lower()
+            if scan in ("y", "yes", ""):
+                print(f"  Scanning {subnet}1-254 ...", end="", flush=True)
+                found = scan_for_dlive(
+                    progress_callback=lambda d, t: print(
+                        f"\r  Scanning {subnet}1-254 ... {int(d/t*100)}%",
+                        end="", flush=True,
+                    )
+                )
+                print(f"\r  Scanning {subnet}1-254 ... done!   \n")
+                if found:
+                    if len(found) == 1:
+                        ip = found[0][0]
+                        print(f"  Found: {found[0][2]} at {ip}:{found[0][1]}\n")
+                    else:
+                        options = [
+                            (fip, f"{fip}  ({ftype}, port {fport})")
+                            for fip, fport, ftype in found
+                        ]
+                        ip = _ask_choice("Which dLive?", options)
+                else:
+                    print("  No dLive consoles found. Enter the IP manually.\n")
+    except ImportError:
+        pass
+
+    if not ip:
+        ip = _ask("dLive IP address", "192.168.1.80")
     target = _ask_choice("Connecting to:", [
         ("mixrack", f"MixRack  (port {DLIVE_MIXRACK_PORT})"),
         ("surface", f"Surface  (port {DLIVE_SURFACE_PORT})"),

@@ -153,6 +153,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Interactive setup wizard — configure, test, and install",
     )
 
+    # -- scan subcommand --
+    subparsers.add_parser(
+        "scan",
+        help="Scan the local network for dLive consoles",
+    )
+
     # -- run subcommand --
     run_parser = subparsers.add_parser(
         "run",
@@ -254,6 +260,34 @@ def _handle_run(args):
         pass
 
 
+def _handle_scan():
+    """Scan the local network for dLive consoles."""
+    from .wizard import scan_for_dlive, _get_local_subnet
+
+    subnet = _get_local_subnet()
+    if not subnet:
+        print("Could not determine your local network.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Scanning {subnet}1-254 for dLive consoles...", end="", flush=True)
+
+    def _progress(done, total):
+        pct = int(done / total * 100)
+        print(f"\rScanning {subnet}1-254 for dLive consoles... {pct}%", end="", flush=True)
+
+    found = scan_for_dlive(progress_callback=_progress)
+    print(f"\rScanning {subnet}1-254 for dLive consoles... done!   ")
+
+    if found:
+        print(f"\nFound {len(found)} dLive device(s):\n")
+        for ip, port, dtype in found:
+            print(f"  {dtype:10s}  {ip}:{port}")
+        print()
+    else:
+        print("\nNo dLive consoles found.")
+        print("Make sure the console is powered on and on the same network.\n")
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -261,6 +295,8 @@ def main():
     if args.command == "setup":
         from .wizard import run_wizard
         run_wizard()
+    elif args.command == "scan":
+        _handle_scan()
     elif args.command == "run":
         _handle_run(args)
     else:

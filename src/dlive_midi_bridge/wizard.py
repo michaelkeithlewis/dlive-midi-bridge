@@ -171,6 +171,73 @@ def test_tcp_connection(host: str, port: int, timeout: float = 5.0) -> bool:
         sock.close()
 
 
+def _get_local_subnet() -> Optional[str]:
+    """Get the local IP's /24 subnet prefix (e.g. '192.168.1.')."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        parts = local_ip.split(".")
+        if len(parts) == 4:
+            return ".".join(parts[:3]) + "."
+    except Exception:
+        pass
+    return None
+
+
+def _scan_single_host(ip: str, port: int, timeout: float = 0.4) -> Optional[tuple[str, int, str]]:
+    """Try connecting to a single host:port. Returns (ip, port, type) or None."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        if sock.connect_ex((ip, port)) == 0:
+            target_type = "MixRack" if port == DLIVE_MIXRACK_PORT else "Surface"
+            return (ip, port, target_type)
+    except (socket.timeout, OSError):
+        pass
+    finally:
+        sock.close()
+    return None
+
+
+def scan_for_dlive(progress_callback=None) -> list[tuple[str, int, str]]:
+    """
+    Scan the local /24 subnet for dLive consoles.
+
+    Checks TCP ports 51325 (MixRack) and 51328 (Surface) on all 254 addresses.
+    Returns list of (ip, port, type) tuples.
+    """
+    subnet = _get_local_subnet()
+    if not subnet:
+        return []
+
+    import concurrent.futures
+
+    found = []
+    tasks = []
+    for i in range(1, 255):
+        ip = f"{subnet}{i}"
+        tasks.append((ip, DLIVE_MIXRACK_PORT))
+        tasks.append((ip, DLIVE_SURFACE_PORT))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
+        futures = {
+            pool.submit(_scan_single_host, ip, port): (ip, port)
+            for ip, port in tasks
+        }
+        done_count = 0
+        for future in concurrent.futures.as_completed(futures):
+            done_count += 1
+            if progress_callback and done_count % 32 == 0:
+                progress_callback(done_count, len(tasks))
+            result = future.result()
+            if result:
+                found.append(result)
+
+    return found
+
+
 def scan_midi_ports() -> list[str]:
     try:
         import rtmidi
@@ -187,6 +254,41 @@ def scan_midi_ports() -> list[str]:
 
 def step_dlive_ip() -> str:
     step_header(1, "dLive IP Address")
+
+    subnet = _get_local_subnet()
+    if subnet:
+        print(f"  Your network: {subnet}x")
+        if ask_yes_no("Scan the network for dLive consoles?", default=True):
+            print(f"  Scanning {subnet}1-254 ...", end="", flush=True)
+
+            def _progress(done, total):
+                pct = int(done / total * 100)
+                print(f"\r  Scanning {subnet}1-254 ... {pct}%", end="", flush=True)
+
+            found = scan_for_dlive(progress_callback=_progress)
+            print(f"\r  Scanning {subnet}1-254 ... done!   ")
+            print()
+
+            if found:
+                if len(found) == 1:
+                    ip, port, dtype = found[0]
+                    ok(f"Found dLive {dtype} at {ip}:{port}")
+                    if ask_yes_no(f"Use {ip}?", default=True):
+                        return ip
+                else:
+                    print(f"  Found {len(found)} dLive device(s):")
+                    options = [
+                        (ip, f"{ip}  ({dtype}, port {port})")
+                        for ip, port, dtype in found
+                    ]
+                    chosen_ip = ask_choice("Which one?", options)
+                    ok(f"Using {chosen_ip}")
+                    return chosen_ip
+            else:
+                warn("No dLive consoles found on the network.")
+                print("  The console might be off, or on a different subnet.")
+                print()
+
     print("  Enter the IP address of your dLive MixRack or Surface.")
     print()
     while True:
