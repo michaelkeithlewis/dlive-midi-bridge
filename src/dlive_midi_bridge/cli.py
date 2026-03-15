@@ -255,7 +255,7 @@ HELP_TEXT = """
   dlive uninstall    Remove everything
 
   Advanced (power-user):
-    dlive run --dlive-ip 192.168.1.80 --log-midi --verbose
+    dlive run --dlive-ip 192.168.1.70 --log-midi --verbose
     dlive run --list-midi-ports
     dlive --version
 """

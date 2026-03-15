@@ -292,7 +292,7 @@ def step_dlive_ip() -> str:
     print("  Enter the IP address of your dLive MixRack or Surface.")
     print()
     while True:
-        ip = ask("dLive IP address", default="192.168.1.80")
+        ip = ask("dLive IP address", default="192.168.1.70")
         if validate_ip(ip):
             ok(f"IP address: {ip}")
             return ip

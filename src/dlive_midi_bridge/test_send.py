@@ -6,7 +6,7 @@ and sends program changes, CC messages, or note on/off for verification.
 
 Usage:
     dlive-test-send                                      # interactive mode
-    dlive-test-send --dlive-ip 192.168.1.80 --program 5  # scripted mode
+    dlive-test-send --dlive-ip 192.168.1.70 --program 5  # scripted mode
 """
 
 import argparse
@@ -151,7 +151,7 @@ async def run_interactive():
         pass
 
     if not ip:
-        ip = _ask("dLive IP address", "192.168.1.80")
+        ip = _ask("dLive IP address", "192.168.1.70")
     port = DLIVE_MIXRACK_PORT
     channel = _ask_int("MIDI channel", 1, 1, 16)
     ch_zero = channel - 1
@@ -270,10 +270,10 @@ def main():
         epilog=(
             "Run with no arguments for interactive guided mode.\n\n"
             "Examples (scripted):\n"
-            "  %(prog)s --dlive-ip 192.168.1.80 --channel 8 --program 5\n"
-            "  %(prog)s --dlive-ip 192.168.1.80 --sweep\n"
-            "  %(prog)s --dlive-ip 192.168.1.80 --cc 7 --cc-value 100\n"
-            "  %(prog)s --dlive-ip 192.168.1.80 --note 60\n"
+            "  %(prog)s --dlive-ip 192.168.1.70 --channel 8 --program 5\n"
+            "  %(prog)s --dlive-ip 192.168.1.70 --sweep\n"
+            "  %(prog)s --dlive-ip 192.168.1.70 --cc 7 --cc-value 100\n"
+            "  %(prog)s --dlive-ip 192.168.1.70 --note 60\n"
         ),
     )
 

@@ -3,7 +3,7 @@
 
 # ── dLive Connection ─────────────────────────────────────────────────
 # IP address of your dLive MixRack or Surface
-dlive_ip: "192.168.1.80"
+dlive_ip: "192.168.1.70"
 
 # TCP port — defaults based on target:
 #   MixRack:  51325  (no TLS) / 51327 (TLS)

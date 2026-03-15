@@ -41,7 +41,7 @@ class DLiveTCPConnection:
       - Configurable target (MixRack vs Surface) and port
 
     Usage:
-        conn = DLiveTCPConnection(host="192.168.1.80")
+        conn = DLiveTCPConnection(host="192.168.1.70")
         await conn.connect()
         conn.send_midi(bytes([0x90, 0x00, 0x7F]))  # Note On
     """
