@@ -109,6 +109,42 @@ async def _connect(ip: str, port: int) -> DLiveTCPConnection:
     return conn
 
 
+def _load_saved_config() -> dict:
+    """Try to load existing config for sensible defaults."""
+    from pathlib import Path
+    try:
+        import yaml
+        for p in [
+            Path.home() / ".config" / "dlive-midi-bridge" / "config.yaml",
+            Path("/etc/dlive-midi-bridge/config.yaml"),
+        ]:
+            if p.exists():
+                with open(p) as f:
+                    return yaml.safe_load(f) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _check_service_running() -> bool:
+    """Check if the bridge service is currently running."""
+    import platform
+    import subprocess
+    if platform.system() == "Darwin":
+        result = subprocess.run(
+            ["launchctl", "list", "com.backlinelogic.dlive-midi-bridge"],
+            capture_output=True, text=True,
+        )
+        return result.returncode == 0
+    elif platform.system() == "Linux":
+        result = subprocess.run(
+            ["systemctl", "is-active", "dlive-midi-bridge"],
+            capture_output=True, text=True,
+        )
+        return result.stdout.strip() == "active"
+    return False
+
+
 async def run_interactive():
     logging.basicConfig(
         level=logging.INFO,
@@ -119,41 +155,58 @@ async def run_interactive():
     print(TRUCK_PACKER_BANNER)
     print("  ── dLive Test Sender ─────────────────────────────\n")
 
-    # Offer network scan
+    # Warn if the bridge service is already running
+    if _check_service_running():
+        print("  NOTE: The bridge service is currently running.")
+        print("  Test messages will go to the dLive AND get echoed")
+        print("  back to all connected MIDI peers on the network.\n")
+
+    # Load saved config for defaults
+    saved = _load_saved_config()
+    default_ip = saved.get("dlive_ip", "192.168.1.70")
+    default_ch = saved.get("midi_channel", 1)
+
+    # Offer network scan or use saved IP
     ip = None
-    try:
-        from .wizard import scan_for_dlive, _get_local_subnet
-        subnet = _get_local_subnet()
-        if subnet:
-            scan = _ask("Scan network for dLive? (Y/n)", "Y").lower()
-            if scan in ("y", "yes", ""):
-                print(f"  Scanning {subnet}1-254 ...", end="", flush=True)
-                found = scan_for_dlive(
-                    progress_callback=lambda d, t: print(
-                        f"\r  Scanning {subnet}1-254 ... {int(d/t*100)}%",
-                        end="", flush=True,
-                    )
-                )
-                print(f"\r  Scanning {subnet}1-254 ... done!   \n")
-                if found:
-                    if len(found) == 1:
-                        ip = found[0][0]
-                        print(f"  Found: {found[0][2]} at {ip}:{found[0][1]}\n")
-                    else:
-                        options = [
-                            (fip, f"{fip}  ({ftype}, port {fport})")
-                            for fip, fport, ftype in found
-                        ]
-                        ip = _ask_choice("Which dLive?", options)
-                else:
-                    print("  No dLive consoles found. Enter the IP manually.\n")
-    except ImportError:
-        pass
+    if default_ip:
+        use_saved = _ask(f"dLive IP address", default_ip)
+        if use_saved:
+            ip = use_saved
 
     if not ip:
-        ip = _ask("dLive IP address", "192.168.1.70")
+        try:
+            from .wizard import scan_for_dlive, _get_local_subnet
+            subnet = _get_local_subnet(saved.get("bind_ip"))
+            if subnet:
+                scan = _ask("Scan network for dLive? (Y/n)", "Y").lower()
+                if scan in ("y", "yes", ""):
+                    print(f"  Scanning {subnet}1-254 ...", end="", flush=True)
+                    found = scan_for_dlive(
+                        progress_callback=lambda d, t: print(
+                            f"\r  Scanning {subnet}1-254 ... {int(d/t*100)}%",
+                            end="", flush=True,
+                        )
+                    )
+                    print(f"\r  Scanning {subnet}1-254 ... done!   \n")
+                    if found:
+                        if len(found) == 1:
+                            ip = found[0][0]
+                            print(f"  Found: {found[0][2]} at {ip}:{found[0][1]}\n")
+                        else:
+                            options = [
+                                (fip, f"{fip}  ({ftype}, port {fport})")
+                                for fip, fport, ftype in found
+                            ]
+                            ip = _ask_choice("Which dLive?", options)
+                    else:
+                        print("  No dLive consoles found. Enter the IP manually.\n")
+        except ImportError:
+            pass
+
+    if not ip:
+        ip = _ask("dLive IP address", default_ip)
     port = DLIVE_MIXRACK_PORT
-    channel = _ask_int("MIDI channel", 1, 1, 16)
+    channel = _ask_int("MIDI channel", default_ch, 1, 16)
     ch_zero = channel - 1
 
     conn = await _connect(ip, port)
