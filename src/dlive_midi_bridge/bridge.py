@@ -4,14 +4,16 @@ Bidirectional MIDI bridge: RTP-MIDI <-> dLive TCP.
 This is the core orchestrator that:
   1. Starts the RTP-MIDI receiver (Bonjour discovery + session handler)
   2. Connects to the dLive via TCP
-  3. Pipes MIDI from network/USB → dLive TCP (forward path)
-  4. Pipes MIDI from dLive TCP → RTP-MIDI network (return path)
-  5. Provides status/stats for monitoring
+  3. Pipes MIDI from network/USB/virtual → dLive TCP (forward path)
+  4. Pipes MIDI from dLive TCP → RTP-MIDI network + virtual port (return path)
+  5. Creates a virtual MIDI port so other apps can patch into the bridge
+  6. Provides status/stats for monitoring
 """
 
 import asyncio
 import logging
 import signal
+import threading
 from typing import Optional
 
 from .rtp_midi import RTPMIDIReceiver
@@ -19,6 +21,65 @@ from .dlive_tcp import DLiveTCPConnection, DLIVE_MIXRACK_PORT, DLIVE_SURFACE_POR
 from .local_midi import LocalMIDIInput
 
 logger = logging.getLogger(__name__)
+
+
+class VirtualMIDIPort:
+    """
+    Creates a virtual MIDI device visible to all apps on the system.
+
+    Output port: dLive MIDI appears here (apps receive from it).
+    Input port:  apps send MIDI here → forwarded to the dLive.
+    """
+
+    def __init__(self, name: str, midi_callback=None):
+        self.name = name
+        self.midi_callback = midi_callback
+        self._out = None
+        self._in = None
+
+    def start(self):
+        try:
+            import rtmidi
+
+            self._out = rtmidi.MidiOut()
+            self._out.open_virtual_port(self.name)
+            logger.info(f"Virtual MIDI output port: '{self.name}'")
+
+            self._in = rtmidi.MidiIn()
+            self._in.open_virtual_port(self.name)
+            self._in.ignore_types(sysex=False, timing=True, active_sense=True)
+            if self.midi_callback:
+                self._in.set_callback(self._on_input)
+            logger.info(f"Virtual MIDI input port: '{self.name}'")
+        except Exception as e:
+            logger.warning(f"Could not create virtual MIDI port: {e}")
+            self._out = None
+            self._in = None
+
+    def _on_input(self, event, _data=None):
+        message, _delta = event
+        if message and self.midi_callback:
+            self.midi_callback(bytes(message))
+
+    def send(self, data: bytes):
+        if self._out:
+            try:
+                self._out.send_message(list(data))
+            except Exception as e:
+                logger.debug(f"Virtual MIDI send error: {e}")
+
+    def stop(self):
+        if self._in:
+            try:
+                self._in.close_port()
+            except Exception:
+                pass
+        if self._out:
+            try:
+                self._out.close_port()
+            except Exception:
+                pass
+        logger.info("Virtual MIDI port closed")
 
 
 class MIDIBridge:
@@ -61,6 +122,7 @@ class MIDIBridge:
         self._dlive: Optional[DLiveTCPConnection] = None
         self._receiver: Optional[RTPMIDIReceiver] = None
         self._local_midi: Optional[LocalMIDIInput] = None
+        self._virtual_port: Optional[VirtualMIDIPort] = None
         self._running = False
         self._midi_count = 0
         self._midi_return_count = 0
@@ -132,10 +194,8 @@ class MIDIBridge:
 
     def _on_dlive_midi_received(self, data: bytes):
         """
-        Callback: MIDI bytes received from dLive TCP → forward to RTP-MIDI peers.
-
-        This is the return path: dLive scene feedback, fader moves, etc.
-        sent back to the network so other devices can see them.
+        Callback: MIDI bytes received from dLive TCP → forward to RTP-MIDI peers
+        and to the virtual MIDI port (so local apps like SuperRack can see it).
         """
         if not data:
             return
@@ -147,6 +207,9 @@ class MIDIBridge:
 
         if self._receiver:
             self._receiver.send_midi(data)
+
+        if self._virtual_port:
+            self._virtual_port.send(data)
 
     def _on_dlive_connected(self):
         logger.info("=== dLive connection ACTIVE — bridge is live ===")
@@ -170,6 +233,7 @@ class MIDIBridge:
         if self.enable_local_midi:
             filt = self.local_midi_filter or "all"
             logger.info(f"  Local MIDI:    enabled (filter: {filt})")
+        logger.info(f"  Virtual port:  {self.session_name}")
         logger.info("=" * 60)
 
         # Start dLive TCP connection (bidirectional)
@@ -201,6 +265,13 @@ class MIDIBridge:
             )
             self._local_midi.start()
 
+        # Create virtual MIDI port (shows up as a device in other apps)
+        self._virtual_port = VirtualMIDIPort(
+            name=self.session_name,
+            midi_callback=self._on_midi_received,
+        )
+        self._virtual_port.start()
+
         logger.info("Bridge running. Waiting for MIDI...")
 
         # Periodic status
@@ -224,6 +295,8 @@ class MIDIBridge:
         """Stop the bridge gracefully."""
         self._running = False
         logger.info("Shutting down bridge...")
+        if self._virtual_port:
+            self._virtual_port.stop()
         if self._local_midi:
             self._local_midi.stop()
         if self._receiver:

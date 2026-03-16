@@ -221,6 +221,7 @@ async def run_interactive():
             prog = _ask_int("Program number", 0, 0, 127)
             msg = build_program_change(ch_zero, prog)
             conn.send_midi(msg)
+            await conn.flush()
             print(f"\n  >> Program Change -> {prog} on ch {channel}  [{msg.hex(' ')}]\n")
 
         elif msg_type == "cc":
@@ -228,6 +229,7 @@ async def run_interactive():
             cc_val = _ask_int("Value", 127, 0, 127)
             msg = build_cc(ch_zero, cc_num, cc_val)
             conn.send_midi(msg)
+            await conn.flush()
             print(f"\n  >> CC {cc_num} = {cc_val} on ch {channel}  [{msg.hex(' ')}]\n")
 
         elif msg_type == "note":
@@ -235,10 +237,12 @@ async def run_interactive():
             vel = _ask_int("Velocity", 100, 0, 127)
             msg_on = build_note_on(ch_zero, note, vel)
             conn.send_midi(msg_on)
+            await conn.flush()
             print(f"\n  >> Note On {note} vel={vel} on ch {channel}  [{msg_on.hex(' ')}]")
             await asyncio.sleep(1.0)
             msg_off = build_note_off(ch_zero, note)
             conn.send_midi(msg_off)
+            await conn.flush()
             print(f"  >> Note Off {note} on ch {channel}  [{msg_off.hex(' ')}]\n")
 
         elif msg_type == "sweep":
@@ -247,11 +251,10 @@ async def run_interactive():
             for prog in range(sweep_max + 1):
                 msg = build_program_change(ch_zero, prog)
                 conn.send_midi(msg)
+                await conn.flush()
                 print(f"    PC -> {prog}  [{msg.hex(' ')}]")
                 await asyncio.sleep(1.0)
             print()
-
-        await conn.flush()
 
         again = _ask("Send another?", "Y").strip().lower()
         if again in ("n", "no"):
@@ -283,30 +286,33 @@ async def run_test(args):
         for prog in range(args.sweep_max + 1):
             msg = build_program_change(channel, prog)
             conn.send_midi(msg)
+            await conn.flush()
             print(f"    PC -> {prog}  [{msg.hex(' ')}]")
             await asyncio.sleep(1.0)
 
     elif args.cc is not None:
         msg = build_cc(channel, args.cc, args.cc_value)
         conn.send_midi(msg)
+        await conn.flush()
         print(f"  CC {args.cc} = {args.cc_value}  [{msg.hex(' ')}]")
 
     elif args.note is not None:
         msg_on = build_note_on(channel, args.note, args.velocity)
         conn.send_midi(msg_on)
+        await conn.flush()
         print(f"  Note On  {args.note} vel={args.velocity}  [{msg_on.hex(' ')}]")
         await asyncio.sleep(args.duration)
         msg_off = build_note_off(channel, args.note)
         conn.send_midi(msg_off)
+        await conn.flush()
         print(f"  Note Off {args.note}  [{msg_off.hex(' ')}]")
 
     else:
         prog = args.program
         msg = build_program_change(channel, prog)
         conn.send_midi(msg)
+        await conn.flush()
         print(f"  Program Change -> {prog}  [{msg.hex(' ')}]")
-
-    await conn.flush()
     await asyncio.sleep(0.5)
 
     print("\n  Done. Disconnecting.")

@@ -11,7 +11,8 @@ Designed to run on a Raspberry Pi velcroed to the back of your dLive.
 ```
 Tracks Rig ──(RTP-MIDI/Bonjour)──┐                    ┌──→ Network MIDI peers
                                   ├──→ dLive MixRack ──┤
-USB MIDI controller (local) ─────┘    (TCP:51325)      └──→ SuperRack, etc.
+USB MIDI controller (local) ─────┤    (TCP:51325)      ├──→ Virtual MIDI port
+Apps (SuperRack, DAW, etc.) ─────┘                     └──→ (shows up as a MIDI device)
 ```
 
 ## Install (one command)
