@@ -175,31 +175,29 @@ async def run_interactive():
 
     if not ip:
         try:
-            from .wizard import scan_for_dlive, _get_local_subnet
-            subnet = _get_local_subnet(saved.get("bind_ip"))
-            if subnet:
-                scan = _ask("Scan network for dLive? (Y/n)", "Y").lower()
-                if scan in ("y", "yes", ""):
-                    print(f"  Scanning {subnet}1-254 ...", end="", flush=True)
-                    found = scan_for_dlive(
-                        progress_callback=lambda d, t: print(
-                            f"\r  Scanning {subnet}1-254 ... {int(d/t*100)}%",
-                            end="", flush=True,
-                        )
+            from .wizard import scan_for_dlive
+            scan = _ask("Scan all networks for dLive? (Y/n)", "Y").lower()
+            if scan in ("y", "yes", ""):
+                print(f"  Scanning all interfaces ...", end="", flush=True)
+                found = scan_for_dlive(
+                    progress_callback=lambda d, t: print(
+                        f"\r  Scanning all interfaces ... {int(d/t*100)}%",
+                        end="", flush=True,
                     )
-                    print(f"\r  Scanning {subnet}1-254 ... done!   \n")
-                    if found:
-                        if len(found) == 1:
-                            ip = found[0][0]
-                            print(f"  Found: {found[0][2]} at {ip}:{found[0][1]}\n")
-                        else:
-                            options = [
-                                (fip, f"{fip}  ({ftype}, port {fport})")
-                                for fip, fport, ftype in found
-                            ]
-                            ip = _ask_choice("Which dLive?", options)
+                )
+                print(f"\r  Scanning all interfaces ... done!   \n")
+                if found:
+                    if len(found) == 1:
+                        ip = found[0][0]
+                        print(f"  Found: {found[0][2]} at {ip}:{found[0][1]}\n")
                     else:
-                        print("  No dLive consoles found. Enter the IP manually.\n")
+                        options = [
+                            (fip, f"{fip}  ({ftype}, port {fport})")
+                            for fip, fport, ftype in found
+                        ]
+                        ip = _ask_choice("Which dLive?", options)
+                else:
+                    print("  No dLive consoles found. Enter the IP manually.\n")
         except ImportError:
             pass
 

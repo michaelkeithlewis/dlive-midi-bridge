@@ -206,25 +206,44 @@ def _scan_single_host(ip: str, port: int, timeout: float = 0.4) -> Optional[tupl
     return None
 
 
-def scan_for_dlive(progress_callback=None) -> list[tuple[str, int, str]]:
+def scan_for_dlive(progress_callback=None, bind_ip: Optional[str] = None) -> list[tuple[str, int, str]]:
     """
-    Scan the local /24 subnet for dLive consoles.
+    Scan all active network interfaces for dLive consoles.
 
-    Checks TCP ports 51325 (MixRack) and 51328 (Surface) on all 254 addresses.
+    Checks TCP ports 51325 (MixRack) and 51328 (Surface) on every /24 subnet
+    found across all interfaces. If bind_ip is given, only that subnet is scanned.
     Returns list of (ip, port, type) tuples.
     """
-    subnet = _get_local_subnet()
-    if not subnet:
-        return []
-
     import concurrent.futures
+
+    if bind_ip:
+        subnets = [_get_local_subnet(bind_ip)]
+    else:
+        interfaces = get_network_interfaces()
+        seen = set()
+        subnets = []
+        for iface in interfaces:
+            prefix = _get_local_subnet(iface["ip"])
+            if prefix and prefix not in seen:
+                seen.add(prefix)
+                subnets.append(prefix)
+
+        if not subnets:
+            fallback = _get_local_subnet()
+            if fallback:
+                subnets = [fallback]
+
+    subnets = [s for s in subnets if s]
+    if not subnets:
+        return []
 
     found = []
     tasks = []
-    for i in range(1, 255):
-        ip = f"{subnet}{i}"
-        tasks.append((ip, DLIVE_MIXRACK_PORT))
-        tasks.append((ip, DLIVE_SURFACE_PORT))
+    for subnet in subnets:
+        for i in range(1, 255):
+            ip = f"{subnet}{i}"
+            tasks.append((ip, DLIVE_MIXRACK_PORT))
+            tasks.append((ip, DLIVE_SURFACE_PORT))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
         futures = {
@@ -423,39 +442,39 @@ def step_network_interface() -> Optional[str]:
 def step_dlive_ip(bind_ip: Optional[str] = None) -> str:
     step_header(2, "dLive IP Address")
 
-    subnet = _get_local_subnet(bind_ip)
-    if subnet:
-        print(f"  Your network: {subnet}x")
-        if ask_yes_no("Scan the network for dLive consoles?", default=True):
-            print(f"  Scanning {subnet}1-254 ...", end="", flush=True)
+    if ask_yes_no("Scan the network for dLive consoles?", default=True):
+        print(f"  Scanning all active interfaces ...", end="", flush=True)
 
-            def _progress(done, total):
-                pct = int(done / total * 100)
-                print(f"\r  Scanning {subnet}1-254 ... {pct}%", end="", flush=True)
+        def _progress(done, total):
+            pct = int(done / total * 100)
+            print(f"\r  Scanning all active interfaces ... {pct}%", end="", flush=True)
 
-            found = scan_for_dlive(progress_callback=_progress)
-            print(f"\r  Scanning {subnet}1-254 ... done!   ")
-            print()
+        found = scan_for_dlive(progress_callback=_progress, bind_ip=bind_ip)
+        print(f"\r  Scanning all active interfaces ... done!   ")
+        print()
 
-            if found:
-                if len(found) == 1:
-                    ip, port, dtype = found[0]
-                    ok(f"Found dLive {dtype} at {ip}:{port}")
-                    if ask_yes_no(f"Use {ip}?", default=True):
-                        return ip
-                else:
-                    print(f"  Found {len(found)} dLive device(s):")
-                    options = [
-                        (ip, f"{ip}  ({dtype}, port {port})")
-                        for ip, port, dtype in found
-                    ]
-                    chosen_ip = ask_choice("Which one?", options)
-                    ok(f"Using {chosen_ip}")
-                    return chosen_ip
-            else:
-                warn("No dLive consoles found on the network.")
-                print("  The console might be off, or on a different subnet.")
-                print()
+    else:
+        found = None
+
+    if found:
+        if len(found) == 1:
+            ip, port, dtype = found[0]
+            ok(f"Found dLive {dtype} at {ip}:{port}")
+            if ask_yes_no(f"Use {ip}?", default=True):
+                return ip
+        else:
+            print(f"  Found {len(found)} dLive device(s):")
+            options = [
+                (ip, f"{ip}  ({dtype}, port {port})")
+                for ip, port, dtype in found
+            ]
+            chosen_ip = ask_choice("Which one?", options)
+            ok(f"Using {chosen_ip}")
+            return chosen_ip
+    elif found is not None:
+        warn("No dLive consoles found on any network.")
+        print("  The console might be off or not connected.")
+        print()
 
     print("  Enter the IP address of your dLive MixRack or Surface.")
     print()

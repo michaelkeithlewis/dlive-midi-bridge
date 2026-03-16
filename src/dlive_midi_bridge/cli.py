@@ -270,21 +270,23 @@ def print_help():
 # ── Scan ─────────────────────────────────────────────────────────────
 
 def _handle_scan():
-    from .wizard import scan_for_dlive, _get_local_subnet
+    from .wizard import scan_for_dlive, get_network_interfaces, _get_local_subnet
 
-    subnet = _get_local_subnet()
-    if not subnet:
-        print("Could not determine your local network.", file=sys.stderr)
-        sys.exit(1)
+    interfaces = get_network_interfaces()
+    if interfaces:
+        print("Active interfaces:")
+        for iface in interfaces:
+            print(f"  {iface['label']:30s}  {iface['ip']}")
+        print()
 
-    print(f"Scanning {subnet}1-254 for dLive consoles...", end="", flush=True)
+    print("Scanning all networks for dLive consoles...", end="", flush=True)
 
     def _progress(done, total):
         pct = int(done / total * 100)
-        print(f"\rScanning {subnet}1-254 for dLive consoles... {pct}%", end="", flush=True)
+        print(f"\rScanning all networks for dLive consoles... {pct}%", end="", flush=True)
 
     found = scan_for_dlive(progress_callback=_progress)
-    print(f"\rScanning {subnet}1-254 for dLive consoles... done!   ")
+    print(f"\rScanning all networks for dLive consoles... done!   ")
 
     if found:
         print(f"\nFound {len(found)} dLive device(s):\n")
