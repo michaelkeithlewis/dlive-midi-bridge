@@ -401,15 +401,28 @@ class AppleMIDISession:
         data_port = self.local_port + 1
         bind_addr = bind_ip or "0.0.0.0"
 
+        # Create reusable sockets so restarts don't fail on TIME_WAIT
+        ctrl_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        ctrl_sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        if hasattr(_socket, "SO_REUSEPORT"):
+            ctrl_sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEPORT, 1)
+        ctrl_sock.bind((bind_addr, control_port))
+
+        data_sock = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        data_sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        if hasattr(_socket, "SO_REUSEPORT"):
+            data_sock.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEPORT, 1)
+        data_sock.bind((bind_addr, data_port))
+
         _, _ = await loop.create_datagram_endpoint(
             lambda: self._ControlProtocol(self),
-            local_addr=(bind_addr, control_port),
+            sock=ctrl_sock,
         )
         logger.info(f"Control port bound on {bind_addr}:{control_port}")
 
         _, _ = await loop.create_datagram_endpoint(
             lambda: self._DataProtocol(self),
-            local_addr=(bind_addr, data_port),
+            sock=data_sock,
         )
         logger.info(f"Data port bound on {bind_addr}:{data_port}")
 
@@ -541,18 +554,23 @@ class BonjourMIDIAdvertiser:
             logger.warning("Could not determine local IP for Bonjour advertisement")
             return
 
-        self._info = ServiceInfo(
-            self.SERVICE_TYPE,
-            f"{self.name}.{self.SERVICE_TYPE}",
-            addresses=[_socket.inet_aton(ip_addr)],
-            port=self.port,
-            properties={},
-        )
-        self._zeroconf = Zeroconf(**zeroconf_kwargs)
-        self._zeroconf.register_service(self._info)
-        logger.info(
-            f"Advertising RTP-MIDI session '{self.name}' on {ip_addr}:{self.port}"
-        )
+        try:
+            self._info = ServiceInfo(
+                self.SERVICE_TYPE,
+                f"{self.name}.{self.SERVICE_TYPE}",
+                addresses=[_socket.inet_aton(ip_addr)],
+                port=self.port,
+                properties={},
+            )
+            self._zeroconf = Zeroconf(**zeroconf_kwargs)
+            self._zeroconf.register_service(self._info)
+            logger.info(
+                f"Advertising RTP-MIDI session '{self.name}' on {ip_addr}:{self.port}"
+            )
+        except Exception as e:
+            logger.warning(f"Bonjour advertisement failed: {e}")
+            self._zeroconf = None
+            self._info = None
 
     def stop(self):
         if self._zeroconf and self._info:
@@ -563,14 +581,30 @@ class BonjourMIDIAdvertiser:
 
 
 def _get_local_ip() -> Optional[str]:
+    """Best-effort detection of a routable local IPv4 address."""
+    # Try a UDP connect trick (works even if 8.8.8.8 is unreachable — no packet sent)
+    for dest in ("8.8.8.8", "10.255.255.255", "192.168.255.255"):
+        try:
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            s.settimeout(0)
+            s.connect((dest, 1))
+            ip = s.getsockname()[0]
+            s.close()
+            if ip and ip != "0.0.0.0":
+                return ip
+        except Exception:
+            continue
+
+    # Fallback: enumerate interfaces
     try:
-        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
+        hostname = _socket.gethostname()
+        for info in _socket.getaddrinfo(hostname, None, _socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127."):
+                return ip
     except Exception:
-        return None
+        pass
+    return None
 
 
 # ── High-level receiver / sender ─────────────────────────────────────
@@ -611,20 +645,40 @@ class RTPMIDIReceiver:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._known_peers: set[str] = set()
 
+    def _is_own_session(self, name: str, host: str, port: int) -> bool:
+        """Detect whether a discovered service is our own advertisement."""
+        # Bonjour names include the service type, e.g. "My Session._apple-midi._udp.local."
+        if self.session_name.lower() in name.lower() and port == self.local_port:
+            return True
+        # Also check by IP: if the host is us and the port matches
+        local_ips = set()
+        if self.bind_ip:
+            local_ips.add(self.bind_ip)
+        detected = _get_local_ip()
+        if detected:
+            local_ips.add(detected)
+        local_ips.add("127.0.0.1")
+        try:
+            local_ips.add(_socket.gethostbyname(_socket.gethostname()))
+        except Exception:
+            pass
+        if host in local_ips and port == self.local_port:
+            return True
+        return False
+
     def _on_peer_discovered(self, name: str, host: str, port: int):
         """Called by the Bonjour browser when a remote session appears."""
-        key = f"{host}:{port}"
-
-        # Don't connect to ourselves
-        if name == self.session_name:
-            logger.debug(f"Ignoring own session '{name}'")
+        if self._is_own_session(name, host, port):
+            logger.debug(f"Ignoring own session '{name}' at {host}:{port}")
             return
 
+        key = f"{host}:{port}"
         if key in self._known_peers:
             logger.debug(f"Already tracking peer at {key}")
             return
         self._known_peers.add(key)
 
+        logger.info(f"Connecting to discovered peer '{name}' at {host}:{port}")
         if self._session and self._loop:
             asyncio.run_coroutine_threadsafe(
                 self._session.invite_peer(host, port), self._loop
