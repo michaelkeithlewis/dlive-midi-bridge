@@ -253,11 +253,19 @@ class AppleMIDISession:
     def send_midi(self, data: bytes):
         """Broadcast MIDI bytes to every connected peer via RTP."""
         if not self._data_transport:
+            logger.warning("send_midi: no data transport bound")
             return
+
+        connected = [p for p in self._peers.values() if p.connected]
+        if not connected:
+            logger.debug(
+                f"send_midi: no connected peers "
+                f"(total tracked: {len(self._peers)})"
+            )
+            return
+
         packet = self._build_rtp_midi_packet(data)
-        for peer in self._peers.values():
-            if not peer.connected:
-                continue
+        for peer in connected:
             try:
                 self._data_transport.sendto(packet, peer.data_addr)
                 logger.debug(
@@ -325,7 +333,10 @@ class AppleMIDISession:
         def error_received(self, exc):
             logger.warning(f"Data port error: {exc}")
 
-    def _handle_control_message(self, data: bytes, addr: tuple):
+    def _handle_apple_midi(self, data: bytes, addr: tuple,
+                           reply_transport: asyncio.DatagramTransport,
+                           is_data_port: bool = False):
+        """Process an AppleMIDI control message from either port."""
         if len(data) < 8:
             return
 
@@ -333,25 +344,37 @@ class AppleMIDISession:
         if sig != APPLEMIDI_SIGNATURE:
             return
 
+        # For messages arriving on the data port, map address to control port
+        # so we don't create duplicate peer entries.
+        ctrl_addr = (addr[0], addr[1] - 1) if is_data_port else addr
+
         if cmd == CMD_INVITATION:
             if len(data) < 16:
                 return
             _, _, _ver, token, peer_ssrc = struct.unpack(">HHIII", data[:16])
-            peer = self._get_or_create_peer(addr)
+            peer = self._get_or_create_peer(ctrl_addr)
             peer.ssrc = peer_ssrc
             peer.connected = True
-            logger.info(f"Accepted invitation from {addr} (SSRC: {peer_ssrc:#x})")
+            logger.info(
+                f"Accepted invitation from {addr} "
+                f"({'data' if is_data_port else 'control'} port, "
+                f"SSRC: {peer_ssrc:#x})"
+            )
             ack = self._build_invitation_ack(token)
-            self._control_transport.sendto(ack, addr)
+            reply_transport.sendto(ack, addr)
 
         elif cmd == CMD_INVITATION_ACK:
             if len(data) < 16:
                 return
             _, _, _ver, token, peer_ssrc = struct.unpack(">HHIII", data[:16])
-            peer = self._get_or_create_peer(addr)
+            peer = self._get_or_create_peer(ctrl_addr)
             peer.ssrc = peer_ssrc
             peer.connected = True
-            logger.info(f"Invitation accepted by {addr} (SSRC: {peer_ssrc:#x})")
+            logger.info(
+                f"Invitation accepted by {addr} "
+                f"({'data' if is_data_port else 'control'} port, "
+                f"SSRC: {peer_ssrc:#x})"
+            )
 
         elif cmd == CMD_SYNC:
             if len(data) >= 36:
@@ -363,26 +386,27 @@ class AppleMIDISession:
                 now = self._now_ts()
                 if count == 0:
                     reply = self._build_sync(1, [ts1, now, 0])
-                    self._control_transport.sendto(reply, addr)
+                    reply_transport.sendto(reply, addr)
                 elif count == 1:
                     reply = self._build_sync(2, [ts1, ts2, now])
-                    self._control_transport.sendto(reply, addr)
+                    reply_transport.sendto(reply, addr)
 
         elif cmd == CMD_BYE:
-            key = (addr[0], addr[1])
-            if key in self._peers:
-                self._peers[key].connected = False
-                logger.info(f"Peer {addr} sent BYE")
-            # Also check for control-port keyed peer (data port addr = control + 1)
-            ctrl_key = (addr[0], addr[1] - 1)
+            ctrl_key = (addr[0], addr[1] - 1) if is_data_port else (addr[0], addr[1])
             if ctrl_key in self._peers:
                 self._peers[ctrl_key].connected = False
+                logger.info(f"Peer {ctrl_key} sent BYE")
+
+    def _handle_control_message(self, data: bytes, addr: tuple):
+        if self._control_transport:
+            self._handle_apple_midi(data, addr, self._control_transport, is_data_port=False)
 
     def _handle_data_message(self, data: bytes, addr: tuple):
         if len(data) >= 4:
             sig = struct.unpack(">H", data[:2])[0]
             if sig == APPLEMIDI_SIGNATURE:
-                self._handle_control_message(data, addr)
+                if self._data_transport:
+                    self._handle_apple_midi(data, addr, self._data_transport, is_data_port=True)
                 return
 
         midi_bytes = self._extract_midi_from_rtp(data)

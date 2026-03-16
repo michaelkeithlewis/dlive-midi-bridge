@@ -130,9 +130,8 @@ class MIDIBridge:
 
     def _on_midi_received(self, data: bytes):
         """
-        Callback: MIDI bytes received from RTP-MIDI → forward to dLive.
-
-        Optionally filter by MIDI channel if configured.
+        Callback: MIDI bytes received from RTP-MIDI / local / virtual
+        → forward to dLive AND relay to all other RTP-MIDI peers.
         """
         if not data:
             return
@@ -150,8 +149,13 @@ class MIDIBridge:
         if self.log_midi:
             self._log_midi_message(data)
 
+        # Forward to dLive
         if self._dlive:
             self._dlive.send_midi(data)
+
+        # Relay to all RTP-MIDI peers (so SuperRack gets Tracks MIDI, etc.)
+        if self._receiver:
+            self._receiver.send_midi(data)
 
     def _log_midi_message(self, data: bytes):
         """Human-readable MIDI message logging."""
@@ -202,12 +206,15 @@ class MIDIBridge:
             return
 
         self._midi_return_count += 1
+        logger.info(f"dLive → network: [{data.hex(' ')}]")
 
         if self.log_midi:
             self._log_midi_message(data)
 
         if self._receiver:
             self._receiver.send_midi(data)
+        else:
+            logger.warning("No RTP-MIDI receiver — cannot forward to network")
 
         if self._virtual_port:
             self._virtual_port.send(data)
@@ -284,11 +291,18 @@ class MIDIBridge:
             await asyncio.sleep(30)
             dlive_status = "CONNECTED" if self._dlive and self._dlive.connected else "DISCONNECTED"
             stats = self._dlive.stats if self._dlive else {}
+
+            rtp_peers = 0
+            if self._receiver and self._receiver._session:
+                rtp_peers = sum(
+                    1 for p in self._receiver._session._peers.values() if p.connected
+                )
+
             logger.info(
                 f"Status: dLive={dlive_status} | "
+                f"RTP peers={rtp_peers} | "
                 f"MIDI in→dLive={self._midi_count} | "
                 f"dLive→network={self._midi_return_count} | "
-                f"TCP bytes sent={stats.get('bytes_sent', 0)} | "
                 f"Active Sense rx={stats.get('active_sense_received', 0)}"
             )
 
