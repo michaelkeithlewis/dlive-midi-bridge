@@ -411,11 +411,17 @@ class AppleMIDISession:
 
         midi_bytes = self._extract_midi_from_rtp(data)
         if midi_bytes:
-            logger.debug(
-                f"MIDI rx from {addr} [{len(midi_bytes)} bytes]: "
+            logger.info(
+                f"RTP-MIDI rx ← {addr[0]} [{len(midi_bytes)} bytes]: "
                 f"{midi_bytes.hex(' ')}"
             )
             self.midi_callback(midi_bytes)
+        else:
+            if len(data) >= 12:
+                logger.debug(
+                    f"RTP packet from {addr} but no MIDI extracted "
+                    f"(len={len(data)}, hdr={data[:4].hex(' ')})"
+                )
 
     # ── Session lifecycle ────────────────────────────────────────────
 

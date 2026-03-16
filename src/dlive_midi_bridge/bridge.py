@@ -142,16 +142,23 @@ class MIDIBridge:
             if 0x80 <= status <= 0xEF:
                 msg_channel = status & 0x0F
                 if msg_channel != self.midi_channel:
+                    logger.debug(
+                        f"Channel filter: dropped ch{msg_channel+1} "
+                        f"(want ch{self.midi_channel+1}) [{data.hex(' ')}]"
+                    )
                     return
 
         self._midi_count += 1
+        logger.info(f"MIDI → dLive: [{data.hex(' ')}]")
 
         if self.log_midi:
             self._log_midi_message(data)
 
         # Forward to dLive
         if self._dlive:
-            self._dlive.send_midi(data)
+            sent = self._dlive.send_midi(data)
+            if not sent:
+                logger.warning("dLive send FAILED (not connected)")
 
         # Relay to all RTP-MIDI peers (so SuperRack gets Tracks MIDI, etc.)
         if self._receiver:
@@ -282,29 +289,38 @@ class MIDIBridge:
 
         logger.info("Bridge running. Waiting for MIDI...")
 
-        # Periodic status
+        # Periodic status — first report after 5s so you can quickly check peers
         asyncio.create_task(self._status_loop())
 
     async def _status_loop(self):
         """Print periodic status info."""
+        await asyncio.sleep(5)
+        self._log_status()
         while self._running:
-            await asyncio.sleep(30)
-            dlive_status = "CONNECTED" if self._dlive and self._dlive.connected else "DISCONNECTED"
-            stats = self._dlive.stats if self._dlive else {}
+            await asyncio.sleep(25)
+            self._log_status()
 
-            rtp_peers = 0
-            if self._receiver and self._receiver._session:
-                rtp_peers = sum(
-                    1 for p in self._receiver._session._peers.values() if p.connected
-                )
+    def _log_status(self):
+        dlive_status = "CONNECTED" if self._dlive and self._dlive.connected else "DISCONNECTED"
+        stats = self._dlive.stats if self._dlive else {}
 
-            logger.info(
-                f"Status: dLive={dlive_status} | "
-                f"RTP peers={rtp_peers} | "
-                f"MIDI in→dLive={self._midi_count} | "
-                f"dLive→network={self._midi_return_count} | "
-                f"Active Sense rx={stats.get('active_sense_received', 0)}"
-            )
+        peer_details = ""
+        rtp_peers = 0
+        if self._receiver and self._receiver._session:
+            for addr, p in self._receiver._session._peers.items():
+                state = "CONNECTED" if p.connected else "idle"
+                peer_details += f"\n    Peer {addr[0]}:{addr[1]} = {state}"
+                if p.connected:
+                    rtp_peers += 1
+
+        logger.info(
+            f"Status: dLive={dlive_status} | "
+            f"RTP peers={rtp_peers} | "
+            f"MIDI in→dLive={self._midi_count} | "
+            f"dLive→network={self._midi_return_count} | "
+            f"Active Sense rx={stats.get('active_sense_received', 0)}"
+            f"{peer_details}"
+        )
 
     async def stop(self):
         """Stop the bridge gracefully."""
