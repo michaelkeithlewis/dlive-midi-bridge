@@ -120,6 +120,7 @@ def _handle_restart():
 
 
 def _handle_status():
+    print(f"Version:   {__version__}")
     config_path = _find_config()
     if config_path:
         config = _load_config(config_path)

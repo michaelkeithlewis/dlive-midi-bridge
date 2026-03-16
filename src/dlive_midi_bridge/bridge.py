@@ -16,6 +16,7 @@ import signal
 import threading
 from typing import Optional
 
+from . import __version__
 from .rtp_midi import RTPMIDIReceiver
 from .dlive_tcp import DLiveTCPConnection, DLIVE_MIXRACK_PORT, DLIVE_SURFACE_PORT
 from .local_midi import LocalMIDIInput
@@ -222,7 +223,7 @@ class MIDIBridge:
         self._running = True
 
         logger.info("=" * 60)
-        logger.info("  dLive MIDI Bridge")
+        logger.info(f"  dLive MIDI Bridge  v{__version__}")
         logger.info(f"  dLive target:  {self.dlive_host}:{self.dlive_port}")
         logger.info(f"  RTP-MIDI port: {self.local_port}")
         logger.info(f"  Session name:  {self.session_name}")
