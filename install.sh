@@ -18,6 +18,7 @@ BIN_DIR="$HOME/.local/bin"
 echo ""
 echo "  ══════════════════════════════════════════════════════"
 echo "    dLive MIDI Bridge — Installer"
+echo "    https://github.com/michaelkeithlewis/dlive-midi-bridge"
 echo "  ══════════════════════════════════════════════════════"
 echo ""
 
@@ -139,9 +140,11 @@ fi
 
 # ── Done — launch wizard ────────────────────────────────────────────
 
+VERSION=$("$INSTALL_DIR/.venv/bin/dlive" --version 2>&1 | awk '{print $NF}')
+
 echo ""
 echo "  ══════════════════════════════════════════════════════"
-echo "    Installation complete!"
+echo "    Installation complete!  (v${VERSION})"
 echo "  ══════════════════════════════════════════════════════"
 echo ""
 
