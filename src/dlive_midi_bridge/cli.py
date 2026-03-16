@@ -248,6 +248,7 @@ HELP_TEXT = """
   dlive setup        Interactive setup wizard
   dlive scan         Find dLive consoles on the network
   dlive test         Send test MIDI messages (interactive)
+  dlive monitor      Live MIDI monitor (see all traffic)
 
   dlive start        Start the background service
   dlive stop         Stop the background service
@@ -435,6 +436,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("setup", help="Interactive setup wizard")
     subparsers.add_parser("scan", help="Find dLive consoles on the network")
     subparsers.add_parser("test", help="Send test MIDI messages")
+    subparsers.add_parser("monitor", help="Live MIDI monitor (see all traffic)")
     subparsers.add_parser("start", help="Start the background service")
     subparsers.add_parser("stop", help="Stop the background service")
     subparsers.add_parser("restart", help="Restart the background service")
@@ -466,6 +468,12 @@ def main():
         from .test_send import run_interactive
         try:
             asyncio.run(run_interactive())
+        except KeyboardInterrupt:
+            print("\n  Bye!")
+    elif cmd == "monitor":
+        from .monitor import run_monitor
+        try:
+            asyncio.run(run_monitor())
         except KeyboardInterrupt:
             print("\n  Bye!")
     elif cmd == "start":
