@@ -1,15 +1,16 @@
 """
-RTP-MIDI (Apple Network MIDI) receiver.
+RTP-MIDI (Apple Network MIDI) session manager.
 
 Implements the minimal subset of the RTP-MIDI protocol (RFC 6295 / Apple
-extension) needed to receive MIDI data from a network MIDI session advertised
-via Bonjour (mDNS/DNS-SD).
+extension) needed to send and receive MIDI data over a network session
+advertised via Bonjour (mDNS/DNS-SD).
 
 Architecture:
-  - Bonjour browser finds services of type "_apple-midi._udp"
-  - For each discovered peer, we initiate an RTP-MIDI session (AppleMIDI)
-  - MIDI payload is extracted from incoming RTP packets
-  - Extracted bytes are handed to a callback for forwarding
+  - We advertise our own session via Bonjour ("_apple-midi._udp")
+  - We also browse for remote sessions and invite them
+  - A single UDP port pair handles all connected peers
+  - Incoming MIDI from any peer is forwarded to the callback
+  - Outgoing MIDI is broadcast to all connected peers
 
 The AppleMIDI session protocol uses two UDP ports:
   - Control port (even): session management (invitation, sync, bye)
@@ -21,6 +22,7 @@ import logging
 import struct
 import time
 import random
+import socket as _socket
 from typing import Callable, Optional
 
 from zeroconf import Zeroconf, ServiceBrowser, ServiceInfo, ServiceStateChange
@@ -37,28 +39,42 @@ CMD_BYE             = 0x4259  # "BY"
 
 # RTP header constants
 RTP_VERSION = 2
-RTP_MIDI_PAYLOAD_TYPE = 97  # typical for RTP-MIDI
+RTP_MIDI_PAYLOAD_TYPE = 97
+
+
+class _PeerInfo:
+    """State for a single connected RTP-MIDI peer."""
+
+    __slots__ = ("addr", "ssrc", "connected", "data_addr")
+
+    def __init__(self, addr: tuple[str, int], ssrc: int = 0):
+        self.addr = addr                                    # (host, control_port)
+        self.ssrc = ssrc
+        self.connected = False
+        self.data_addr = (addr[0], addr[1] + 1)            # (host, data_port)
 
 
 class AppleMIDISession:
-    """Manages a single RTP-MIDI session with a remote peer."""
+    """
+    Manages an RTP-MIDI session that can communicate with multiple peers.
+
+    Binds a single pair of UDP sockets (control + data) and tracks each
+    peer independently.  Incoming invitations are accepted automatically;
+    outgoing invitations are sent via ``invite_peer()``.
+    """
 
     def __init__(
         self,
         name: str,
-        peer_addr: tuple[str, int],
         midi_callback: Callable[[bytes], None],
         local_port: int = 5004,
     ):
         self.name = name
-        self.peer_addr = peer_addr  # (host, control_port)
         self.midi_callback = midi_callback
         self.local_port = local_port
 
         self.ssrc = random.randint(0, 0xFFFFFFFF)
-        self.initiator_token = random.randint(0, 0xFFFFFFFF)
-        self.peer_ssrc: Optional[int] = None
-        self.connected = False
+        self._peers: dict[tuple, _PeerInfo] = {}            # keyed by (host, control_port)
 
         self._control_transport: Optional[asyncio.DatagramTransport] = None
         self._data_transport: Optional[asyncio.DatagramTransport] = None
@@ -68,19 +84,17 @@ class AppleMIDISession:
     # ── Protocol message builders ────────────────────────────────────
 
     def _build_invitation(self, token: int) -> bytes:
-        """Build an AppleMIDI invitation packet (IN)."""
         name_bytes = self.name.encode("utf-8") + b"\x00"
         return struct.pack(
             ">HHIII",
             APPLEMIDI_SIGNATURE,
             CMD_INVITATION,
-            2,  # protocol version
+            2,
             token,
             self.ssrc,
         ) + name_bytes
 
     def _build_invitation_ack(self, token: int) -> bytes:
-        """Build an AppleMIDI invitation accepted packet (OK)."""
         name_bytes = self.name.encode("utf-8") + b"\x00"
         return struct.pack(
             ">HHIII",
@@ -92,7 +106,6 @@ class AppleMIDISession:
         ) + name_bytes
 
     def _build_sync(self, count: int, timestamps: list[int]) -> bytes:
-        """Build an AppleMIDI sync (CK) packet."""
         pkt = struct.pack(
             ">HHIB",
             APPLEMIDI_SIGNATURE,
@@ -100,14 +113,12 @@ class AppleMIDISession:
             self.ssrc,
             count,
         )
-        # Pad to include 3 timestamp slots (each 8 bytes)
         for i in range(3):
             ts = timestamps[i] if i < len(timestamps) else 0
             pkt += struct.pack(">Q", ts)
         return pkt
 
     def _build_bye(self) -> bytes:
-        """Build an AppleMIDI bye (BY) packet."""
         return struct.pack(
             ">HHII",
             APPLEMIDI_SIGNATURE,
@@ -120,7 +131,6 @@ class AppleMIDISession:
 
     @staticmethod
     def _now_ts() -> int:
-        """Return a microsecond timestamp suitable for sync packets."""
         return int(time.time() * 10000) & 0xFFFFFFFFFFFFFFFF
 
     # ── RTP-MIDI payload extraction ──────────────────────────────────
@@ -132,23 +142,21 @@ class AppleMIDISession:
         RTP-MIDI payload format (RFC 6295, simplified):
           - RTP header: 12 bytes minimum
           - MIDI command section starts with a 1-byte header:
-              Bit 7 (B): 1 if long header (length in 12 bits), 0 if short (4 bits)
-              Bit 6 (J): 1 if journal present
-              Bit 5 (Z): 1 if delta-time for first command
+              Bit 7 (B): 1 = long header (length in 12 bits), 0 = short (4 bits)
+              Bit 6 (J): 1 = journal present
+              Bit 5 (Z): 1 = delta-time for first command
               Bit 4 (P): phantom flag
               Bits 3-0: length of MIDI list (short header)
         """
-        if len(data) < 13:  # 12 byte RTP header + at least 1 byte payload
+        if len(data) < 13:
             return None
 
-        # Quick RTP sanity check
         first_byte = data[0]
         version = (first_byte >> 6) & 0x03
         if version != RTP_VERSION:
             return None
 
-        # Skip RTP header (12 bytes for no CSRC, no extension)
-        cc = first_byte & 0x0F  # CSRC count
+        cc = first_byte & 0x0F
         has_extension = (first_byte >> 4) & 0x01
         offset = 12 + (cc * 4)
 
@@ -159,20 +167,16 @@ class AppleMIDISession:
         if offset >= len(data):
             return None
 
-        # Parse the MIDI command section header
         midi_header = data[offset]
-        b_flag = (midi_header >> 7) & 1  # long header
-        # j_flag = (midi_header >> 6) & 1  # journal present
-        z_flag = (midi_header >> 5) & 1  # delta-time on first cmd
+        b_flag = (midi_header >> 7) & 1
+        z_flag = (midi_header >> 5) & 1
 
         if b_flag:
-            # Long header: length is 12 bits across 2 bytes
             if offset + 1 >= len(data):
                 return None
             midi_len = ((midi_header & 0x0F) << 8) | data[offset + 1]
             offset += 2
         else:
-            # Short header: length is lower 4 bits
             midi_len = midi_header & 0x0F
             offset += 1
 
@@ -181,7 +185,6 @@ class AppleMIDISession:
 
         midi_data = data[offset : offset + midi_len]
 
-        # Strip delta-time prefixes if present (variable-length encoded)
         if z_flag and len(midi_data) > 0:
             midi_data = self._strip_delta_times(midi_data)
 
@@ -189,69 +192,55 @@ class AppleMIDISession:
 
     @staticmethod
     def _strip_delta_times(data: bytes) -> bytes:
-        """
-        Strip variable-length delta-time values from MIDI command list.
-
-        In RTP-MIDI, delta times are variable-length quantities that precede
-        each MIDI command. We strip them to get raw MIDI bytes.
-        """
+        """Strip variable-length delta-time values from the MIDI command list."""
         result = bytearray()
         i = 0
         running_status = 0
 
         while i < len(data):
-            # Skip delta-time (variable length: MSB set = more bytes follow)
             while i < len(data) and (data[i] & 0x80) and data[i] < 0x80:
                 i += 1
-            # One more delta byte (MSB clear)
             if i < len(data) and data[i] < 0x80:
                 i += 1
 
             if i >= len(data):
                 break
 
-            # Now read the MIDI message
             status = data[i]
             if status & 0x80:
-                # New status byte
                 running_status = status
                 result.append(status)
                 i += 1
             else:
-                # Running status — reuse previous status
                 if running_status:
                     result.append(running_status)
                 result.append(data[i])
                 i += 1
 
-            # Read data bytes for this message
             while i < len(data) and not (data[i] & 0x80):
                 result.append(data[i])
                 i += 1
 
         return bytes(result)
 
-    # ── RTP-MIDI send ──────────────────────────────────────────────
+    # ── RTP-MIDI send ────────────────────────────────────────────────
 
     def _build_rtp_midi_packet(self, midi_data: bytes) -> bytes:
-        """Wrap raw MIDI bytes in an RTP packet for sending to a peer."""
+        """Wrap raw MIDI bytes in an RTP packet."""
         self._sequence = (self._sequence + 1) & 0xFFFF
         timestamp = self._now_ts() & 0xFFFFFFFF
 
-        # RTP header: V=2, P=0, X=0, CC=0, M=1, PT=97
         rtp_header = struct.pack(
             ">BBHII",
-            (RTP_VERSION << 6) | 0,  # V=2, P=0, X=0, CC=0
-            0x80 | RTP_MIDI_PAYLOAD_TYPE,  # M=1, PT=97
+            (RTP_VERSION << 6) | 0,
+            0x80 | RTP_MIDI_PAYLOAD_TYPE,
             self._sequence,
             timestamp,
             self.ssrc,
         )
 
-        # MIDI command section: short header (B=0, J=0, Z=0, P=0, len=N)
         midi_len = len(midi_data)
         if midi_len > 15:
-            # Long header: B=1
             midi_header = bytes([
                 0x80 | ((midi_len >> 8) & 0x0F),
                 midi_len & 0xFF,
@@ -262,22 +251,55 @@ class AppleMIDISession:
         return rtp_header + midi_header + midi_data
 
     def send_midi(self, data: bytes):
-        """Send MIDI bytes to the connected peer via RTP."""
-        if not self.connected or not self._data_transport or not self.peer_addr:
+        """Broadcast MIDI bytes to every connected peer via RTP."""
+        if not self._data_transport:
             return
         packet = self._build_rtp_midi_packet(data)
-        data_addr = (self.peer_addr[0], self.peer_addr[1] + 1)
-        try:
-            self._data_transport.sendto(packet, data_addr)
-            logger.debug(f"RTP-MIDI tx [{len(data)} bytes]: {data.hex(' ')}")
-        except Exception as e:
-            logger.warning(f"RTP-MIDI send failed: {e}")
+        for peer in self._peers.values():
+            if not peer.connected:
+                continue
+            try:
+                self._data_transport.sendto(packet, peer.data_addr)
+                logger.debug(
+                    f"RTP-MIDI tx → {peer.addr[0]}:{peer.addr[1]} "
+                    f"[{len(data)} bytes]: {data.hex(' ')}"
+                )
+            except Exception as e:
+                logger.warning(f"RTP-MIDI send to {peer.addr} failed: {e}")
+
+    # ── Peer management ──────────────────────────────────────────────
+
+    def _get_or_create_peer(self, addr: tuple) -> _PeerInfo:
+        key = (addr[0], addr[1])
+        if key not in self._peers:
+            self._peers[key] = _PeerInfo(key)
+            logger.debug(f"New peer registered: {key}")
+        return self._peers[key]
+
+    async def invite_peer(self, host: str, port: int):
+        """Send an invitation to a remote peer."""
+        peer = self._get_or_create_peer((host, port))
+        if peer.connected:
+            logger.debug(f"Already connected to {host}:{port}")
+            return
+
+        token = random.randint(0, 0xFFFFFFFF)
+        inv = self._build_invitation(token)
+
+        logger.info(f"Sending invitation to {host}:{port}")
+        if self._control_transport:
+            self._control_transport.sendto(inv, (host, port))
+        await asyncio.sleep(0.1)
+        if self._data_transport:
+            self._data_transport.sendto(inv, (host, port + 1))
+
+    @property
+    def has_connected_peers(self) -> bool:
+        return any(p.connected for p in self._peers.values())
 
     # ── UDP protocol handlers ────────────────────────────────────────
 
     class _ControlProtocol(asyncio.DatagramProtocol):
-        """Handles the control port (session management)."""
-
         def __init__(self, session: "AppleMIDISession"):
             self.session = session
 
@@ -291,8 +313,6 @@ class AppleMIDISession:
             logger.warning(f"Control port error: {exc}")
 
     class _DataProtocol(asyncio.DatagramProtocol):
-        """Handles the data port (RTP packets with MIDI payload)."""
-
         def __init__(self, session: "AppleMIDISession"):
             self.session = session
 
@@ -306,7 +326,6 @@ class AppleMIDISession:
             logger.warning(f"Data port error: {exc}")
 
     def _handle_control_message(self, data: bytes, addr: tuple):
-        """Process an AppleMIDI control message."""
         if len(data) < 8:
             return
 
@@ -315,22 +334,26 @@ class AppleMIDISession:
             return
 
         if cmd == CMD_INVITATION:
-            # Peer is inviting us — accept
+            if len(data) < 16:
+                return
             _, _, _ver, token, peer_ssrc = struct.unpack(">HHIII", data[:16])
-            self.peer_ssrc = peer_ssrc
-            logger.info(f"Received invitation from {addr}, accepting")
+            peer = self._get_or_create_peer(addr)
+            peer.ssrc = peer_ssrc
+            peer.connected = True
+            logger.info(f"Accepted invitation from {addr} (SSRC: {peer_ssrc:#x})")
             ack = self._build_invitation_ack(token)
             self._control_transport.sendto(ack, addr)
 
         elif cmd == CMD_INVITATION_ACK:
-            # Our invitation was accepted
+            if len(data) < 16:
+                return
             _, _, _ver, token, peer_ssrc = struct.unpack(">HHIII", data[:16])
-            self.peer_ssrc = peer_ssrc
-            self.connected = True
-            logger.info(f"Session established with {addr} (SSRC: {peer_ssrc:#x})")
+            peer = self._get_or_create_peer(addr)
+            peer.ssrc = peer_ssrc
+            peer.connected = True
+            logger.info(f"Invitation accepted by {addr} (SSRC: {peer_ssrc:#x})")
 
         elif cmd == CMD_SYNC:
-            # Respond to sync (CK) — clock synchronization
             if len(data) >= 36:
                 _, _, sender_ssrc, count = struct.unpack(">HHIB", data[:9])
                 ts1 = struct.unpack(">Q", data[9:17])[0]
@@ -346,30 +369,34 @@ class AppleMIDISession:
                     self._control_transport.sendto(reply, addr)
 
         elif cmd == CMD_BYE:
-            logger.info(f"Peer {addr} sent BYE, session ending")
-            self.connected = False
+            key = (addr[0], addr[1])
+            if key in self._peers:
+                self._peers[key].connected = False
+                logger.info(f"Peer {addr} sent BYE")
+            # Also check for control-port keyed peer (data port addr = control + 1)
+            ctrl_key = (addr[0], addr[1] - 1)
+            if ctrl_key in self._peers:
+                self._peers[ctrl_key].connected = False
 
     def _handle_data_message(self, data: bytes, addr: tuple):
-        """Process a data port message — either AppleMIDI control or RTP."""
         if len(data) >= 4:
             sig = struct.unpack(">H", data[:2])[0]
             if sig == APPLEMIDI_SIGNATURE:
-                # AppleMIDI control message on data port (invitation for data channel)
                 self._handle_control_message(data, addr)
                 return
 
-        # Otherwise it's an RTP packet
         midi_bytes = self._extract_midi_from_rtp(data)
         if midi_bytes:
             logger.debug(
-                f"MIDI rx [{len(midi_bytes)} bytes]: {midi_bytes.hex(' ')}"
+                f"MIDI rx from {addr} [{len(midi_bytes)} bytes]: "
+                f"{midi_bytes.hex(' ')}"
             )
             self.midi_callback(midi_bytes)
 
     # ── Session lifecycle ────────────────────────────────────────────
 
     async def start(self, loop: asyncio.AbstractEventLoop, bind_ip: Optional[str] = None):
-        """Bind UDP sockets and optionally send invitation to peer."""
+        """Bind UDP sockets on the control and data ports."""
         control_port = self.local_port
         data_port = self.local_port + 1
         bind_addr = bind_ip or "0.0.0.0"
@@ -386,52 +413,43 @@ class AppleMIDISession:
         )
         logger.info(f"Data port bound on {bind_addr}:{data_port}")
 
-        # If we have a specific peer, send invitation
-        if self.peer_addr:
-            await self._send_invitation()
-
-        # Start periodic sync
         self._sync_task = asyncio.create_task(self._sync_loop())
 
-    async def _send_invitation(self):
-        """Send invitation to the remote peer on both ports."""
-        host, port = self.peer_addr
-        inv = self._build_invitation(self.initiator_token)
-
-        logger.info(f"Sending invitation to {host}:{port}")
-        # Invite on control port
-        self._control_transport.sendto(inv, (host, port))
-        # Small delay then invite on data port
-        await asyncio.sleep(0.1)
-        if self._data_transport:
-            self._data_transport.sendto(inv, (host, port + 1))
-
     async def _sync_loop(self):
-        """Periodically send sync (CK) packets to keep session alive."""
+        """Periodically send sync (CK) packets to all connected peers."""
         while True:
             await asyncio.sleep(10)
-            if self.connected and self._control_transport and self.peer_addr:
-                now = self._now_ts()
-                sync = self._build_sync(0, [now])
-                try:
-                    self._control_transport.sendto(sync, self.peer_addr)
-                except Exception as e:
-                    logger.warning(f"Sync send failed: {e}")
+            if not self._control_transport:
+                continue
+            now = self._now_ts()
+            sync = self._build_sync(0, [now])
+            for peer in list(self._peers.values()):
+                if peer.connected:
+                    try:
+                        self._control_transport.sendto(sync, peer.addr)
+                    except Exception as e:
+                        logger.warning(f"Sync to {peer.addr} failed: {e}")
 
     async def stop(self):
-        """Gracefully end the session."""
+        """Send BYE to all peers and close transports."""
         if self._sync_task:
             self._sync_task.cancel()
-        if self.connected and self._control_transport and self.peer_addr:
-            bye = self._build_bye()
-            self._control_transport.sendto(bye, self.peer_addr)
+        bye = self._build_bye()
+        for peer in self._peers.values():
+            if peer.connected and self._control_transport:
+                try:
+                    self._control_transport.sendto(bye, peer.addr)
+                except Exception:
+                    pass
         if self._control_transport:
             self._control_transport.close()
         if self._data_transport:
             self._data_transport.close()
-        self.connected = False
+        self._peers.clear()
         logger.info("Session stopped")
 
+
+# ── Bonjour browser ──────────────────────────────────────────────────
 
 class BonjourMIDIBrowser:
     """
@@ -469,7 +487,6 @@ class BonjourMIDIBrowser:
                 svc_name = info.name
 
                 if host and port:
-                    # Apply optional name filter
                     if self.filter_name:
                         if self.filter_name.lower() not in svc_name.lower():
                             logger.debug(
@@ -486,7 +503,6 @@ class BonjourMIDIBrowser:
             logger.info(f"RTP-MIDI session removed: {name}")
 
     def start(self, **zeroconf_kwargs):
-        """Start browsing for RTP-MIDI services."""
         self._zeroconf = Zeroconf(**zeroconf_kwargs)
         self._browser = ServiceBrowser(
             self._zeroconf,
@@ -496,15 +512,73 @@ class BonjourMIDIBrowser:
         logger.info("Bonjour browser started, looking for RTP-MIDI sessions...")
 
     def stop(self):
-        """Stop browsing."""
         if self._zeroconf:
             self._zeroconf.close()
         logger.info("Bonjour browser stopped")
 
 
+# ── Bonjour advertiser ───────────────────────────────────────────────
+
+class BonjourMIDIAdvertiser:
+    """
+    Advertises an RTP-MIDI session via Bonjour so other devices can
+    discover and connect to us (e.g., Audio MIDI Setup on macOS,
+    rtpMIDI on Windows).
+    """
+
+    SERVICE_TYPE = "_apple-midi._udp.local."
+
+    def __init__(self, name: str, port: int, bind_ip: Optional[str] = None):
+        self.name = name
+        self.port = port
+        self.bind_ip = bind_ip
+        self._zeroconf: Optional[Zeroconf] = None
+        self._info: Optional[ServiceInfo] = None
+
+    def start(self, **zeroconf_kwargs):
+        ip_addr = self.bind_ip or _get_local_ip()
+        if not ip_addr:
+            logger.warning("Could not determine local IP for Bonjour advertisement")
+            return
+
+        self._info = ServiceInfo(
+            self.SERVICE_TYPE,
+            f"{self.name}.{self.SERVICE_TYPE}",
+            addresses=[_socket.inet_aton(ip_addr)],
+            port=self.port,
+            properties={},
+        )
+        self._zeroconf = Zeroconf(**zeroconf_kwargs)
+        self._zeroconf.register_service(self._info)
+        logger.info(
+            f"Advertising RTP-MIDI session '{self.name}' on {ip_addr}:{self.port}"
+        )
+
+    def stop(self):
+        if self._zeroconf and self._info:
+            self._zeroconf.unregister_service(self._info)
+        if self._zeroconf:
+            self._zeroconf.close()
+        logger.info("Bonjour advertisement stopped")
+
+
+def _get_local_ip() -> Optional[str]:
+    try:
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return None
+
+
+# ── High-level receiver / sender ─────────────────────────────────────
+
 class RTPMIDIReceiver:
     """
-    High-level receiver: combines Bonjour discovery with session management.
+    High-level RTP-MIDI node: advertises via Bonjour, accepts incoming
+    connections, discovers remote sessions, and handles bidirectional MIDI.
 
     Usage:
         receiver = RTPMIDIReceiver(
@@ -513,6 +587,8 @@ class RTPMIDIReceiver:
             local_port=5004,
         )
         await receiver.start()
+        ...
+        receiver.send_midi(b"\\xc0\\x05")   # broadcast PC to all peers
     """
 
     def __init__(
@@ -529,41 +605,57 @@ class RTPMIDIReceiver:
         self.filter_name = filter_name
         self.bind_ip = bind_ip
 
-        self._sessions: dict[str, AppleMIDISession] = {}
+        self._session: Optional[AppleMIDISession] = None
         self._browser: Optional[BonjourMIDIBrowser] = None
+        self._advertiser: Optional[BonjourMIDIAdvertiser] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._known_peers: set[str] = set()
 
     def _on_peer_discovered(self, name: str, host: str, port: int):
-        """Called when a new RTP-MIDI peer appears on the network."""
+        """Called by the Bonjour browser when a remote session appears."""
         key = f"{host}:{port}"
-        if key in self._sessions:
-            logger.debug(f"Already tracking session at {key}")
+
+        # Don't connect to ourselves
+        if name == self.session_name:
+            logger.debug(f"Ignoring own session '{name}'")
             return
 
-        session = AppleMIDISession(
-            name=self.session_name,
-            peer_addr=(host, port),
-            midi_callback=self.midi_callback,
-            local_port=self.local_port,
-        )
-        self._sessions[key] = session
+        if key in self._known_peers:
+            logger.debug(f"Already tracking peer at {key}")
+            return
+        self._known_peers.add(key)
 
-        if self._loop:
+        if self._session and self._loop:
             asyncio.run_coroutine_threadsafe(
-                session.start(self._loop, bind_ip=self.bind_ip), self._loop
+                self._session.invite_peer(host, port), self._loop
             )
 
     async def start(self):
-        """Start the receiver: browse for peers and accept sessions."""
+        """Start the RTP-MIDI node: bind, advertise, browse, accept."""
         self._loop = asyncio.get_running_loop()
 
-        # Start Bonjour browsing (scoped to interface if bind_ip set)
         zc_kwargs = {}
         if self.bind_ip:
-            import ipaddress
             zc_kwargs["interfaces"] = [self.bind_ip]
-            logger.info(f"Zeroconf bound to {self.bind_ip}")
+            logger.info(f"Zeroconf scoped to {self.bind_ip}")
 
+        # 1. Bind our UDP session on local_port / local_port+1
+        self._session = AppleMIDISession(
+            name=self.session_name,
+            midi_callback=self.midi_callback,
+            local_port=self.local_port,
+        )
+        await self._session.start(self._loop, bind_ip=self.bind_ip)
+
+        # 2. Advertise via Bonjour so peers can find and connect to us
+        self._advertiser = BonjourMIDIAdvertiser(
+            name=self.session_name,
+            port=self.local_port,
+            bind_ip=self.bind_ip,
+        )
+        self._advertiser.start(**zc_kwargs)
+
+        # 3. Browse for existing sessions and send them invitations
         self._browser = BonjourMIDIBrowser(
             on_discovered=self._on_peer_discovered,
             filter_name=self.filter_name,
@@ -571,15 +663,17 @@ class RTPMIDIReceiver:
         self._browser.start(**zc_kwargs)
 
     def send_midi(self, data: bytes):
-        """Send MIDI bytes to all connected RTP-MIDI peers."""
-        for session in self._sessions.values():
-            session.send_midi(data)
+        """Broadcast MIDI bytes to all connected RTP-MIDI peers."""
+        if self._session:
+            self._session.send_midi(data)
 
     async def stop(self):
-        """Stop all sessions and browsing."""
+        """Shut down everything gracefully."""
+        if self._advertiser:
+            self._advertiser.stop()
         if self._browser:
             self._browser.stop()
-        for session in self._sessions.values():
-            await session.stop()
-        self._sessions.clear()
+        if self._session:
+            await self._session.stop()
+        self._known_peers.clear()
         logger.info("RTP-MIDI receiver stopped")
