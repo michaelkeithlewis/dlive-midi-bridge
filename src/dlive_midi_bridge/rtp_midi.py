@@ -258,9 +258,9 @@ class AppleMIDISession:
 
         connected = [p for p in self._peers.values() if p.connected]
         if not connected:
-            logger.debug(
-                f"send_midi: no connected peers "
-                f"(total tracked: {len(self._peers)})"
+            logger.info(
+                f"send_midi: no connected RTP-MIDI peers — MIDI not forwarded "
+                f"(tracked: {len(self._peers)})"
             )
             return
 
@@ -268,7 +268,7 @@ class AppleMIDISession:
         for peer in connected:
             try:
                 self._data_transport.sendto(packet, peer.data_addr)
-                logger.debug(
+                logger.info(
                     f"RTP-MIDI tx → {peer.addr[0]}:{peer.addr[1]} "
                     f"[{len(data)} bytes]: {data.hex(' ')}"
                 )
@@ -285,7 +285,7 @@ class AppleMIDISession:
         return self._peers[key]
 
     async def invite_peer(self, host: str, port: int):
-        """Send an invitation to a remote peer."""
+        """Send an invitation to a remote peer (control + data port handshake)."""
         peer = self._get_or_create_peer((host, port))
         if peer.connected:
             logger.debug(f"Already connected to {host}:{port}")
@@ -294,12 +294,32 @@ class AppleMIDISession:
         token = random.randint(0, 0xFFFFFFFF)
         inv = self._build_invitation(token)
 
-        logger.info(f"Sending invitation to {host}:{port}")
+        # Phase 1: control port invitation
+        logger.info(f"Sending control invitation to {host}:{port}")
         if self._control_transport:
             self._control_transport.sendto(inv, (host, port))
-        await asyncio.sleep(0.1)
+
+        # Wait for control ACK (up to 2s) before sending data invitation
+        for _ in range(20):
+            await asyncio.sleep(0.1)
+            if peer.connected:
+                break
+
+        # Phase 2: data port invitation (required by many implementations)
+        data_token = random.randint(0, 0xFFFFFFFF)
+        data_inv = self._build_invitation(data_token)
+        logger.info(f"Sending data invitation to {host}:{port + 1}")
         if self._data_transport:
-            self._data_transport.sendto(inv, (host, port + 1))
+            self._data_transport.sendto(data_inv, (host, port + 1))
+
+    async def _send_data_invitation(self, peer: _PeerInfo):
+        """Send a data-port invitation to a peer (used after accepting an incoming control invitation)."""
+        await asyncio.sleep(0.05)
+        token = random.randint(0, 0xFFFFFFFF)
+        inv = self._build_invitation(token)
+        if self._data_transport:
+            self._data_transport.sendto(inv, peer.data_addr)
+            logger.info(f"Sent data-port invitation to {peer.addr[0]}:{peer.addr[1] + 1}")
 
     @property
     def has_connected_peers(self) -> bool:
@@ -362,6 +382,11 @@ class AppleMIDISession:
             )
             ack = self._build_invitation_ack(token)
             reply_transport.sendto(ack, addr)
+
+            # After accepting a control-port invitation, initiate data-port handshake
+            if not is_data_port:
+                loop = asyncio.get_event_loop()
+                loop.create_task(self._send_data_invitation(peer))
 
         elif cmd == CMD_INVITATION_ACK:
             if len(data) < 16:
