@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="0.6.4"
+VERSION="0.6.5"
 REPO_URL="https://github.com/michaelkeithlewis/dlive-midi-bridge.git"
 INSTALL_DIR="$HOME/.local/share/dlive-midi-bridge"
 BIN_DIR="$HOME/.local/bin"
@@ -95,10 +95,9 @@ if [[ "$PLATFORM" == "linux" ]]; then
     # pip needs pkg-config for some native builds
     command -v pkg-config &>/dev/null || missing+=(pkg-config)
 
-    # avahi-daemon is required for Bonjour/mDNS (network MIDI discovery)
-    if ! systemctl is-active avahi-daemon &>/dev/null 2>&1; then
-        dpkg -s avahi-daemon &>/dev/null 2>&1 || missing+=(avahi-daemon)
-    fi
+    # avahi is required for Bonjour/mDNS (network MIDI discovery)
+    dpkg -s avahi-daemon &>/dev/null 2>&1 || missing+=(avahi-daemon)
+    dpkg -s avahi-utils &>/dev/null 2>&1 || missing+=(avahi-utils)
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo ""
@@ -113,15 +112,18 @@ if [[ "$PLATFORM" == "linux" ]]; then
     fi
 
     # Ensure avahi-daemon is running (required for Bonjour/mDNS discovery)
-    if ! systemctl is-active avahi-daemon &>/dev/null 2>&1; then
-        echo "  Starting avahi-daemon (Bonjour/mDNS)..."
-        if [[ $EUID -eq 0 ]]; then
-            systemctl enable avahi-daemon 2>/dev/null || true
-            systemctl start avahi-daemon 2>/dev/null || true
-        else
-            sudo systemctl enable avahi-daemon 2>/dev/null || true
-            sudo systemctl start avahi-daemon 2>/dev/null || true
-        fi
+    echo "  Ensuring avahi-daemon is running..."
+    if [[ $EUID -eq 0 ]]; then
+        systemctl enable avahi-daemon 2>/dev/null || true
+        systemctl start avahi-daemon 2>/dev/null || true
+    else
+        sudo systemctl enable avahi-daemon 2>/dev/null || true
+        sudo systemctl start avahi-daemon 2>/dev/null || true
+    fi
+    if systemctl is-active avahi-daemon &>/dev/null 2>&1; then
+        echo "  ✓ avahi-daemon is running"
+    else
+        echo "  ✗ WARNING: avahi-daemon failed to start — Bonjour will not work"
     fi
 
     # Ensure ALSA sequencer kernel module is loaded (needed for MIDI on headless Pi)
