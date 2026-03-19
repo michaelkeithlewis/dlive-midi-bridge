@@ -212,6 +212,16 @@ def _handle_uninstall():
             link.unlink()
             removed.append(f"  - Symlink: {link}")
 
+    # 3b. Remove /usr/local/bin symlink
+    sys_link = Path("/usr/local/bin/dlive")
+    if sys_link.is_symlink():
+        try:
+            sys_link.unlink()
+            removed.append(f"  - Symlink: {sys_link}")
+        except PermissionError:
+            subprocess.run(["sudo", "rm", str(sys_link)], capture_output=True)
+            removed.append(f"  - Symlink: {sys_link}")
+
     # 4. Remove install directory
     if INSTALL_DIR.exists():
         import shutil

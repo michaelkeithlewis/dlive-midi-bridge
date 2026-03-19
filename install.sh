@@ -136,9 +136,18 @@ ln -sf "$INSTALL_DIR/.venv/bin/dlive" "$BIN_DIR/dlive"
 ln -sf "$INSTALL_DIR/.venv/bin/dlive-midi-bridge" "$BIN_DIR/dlive-midi-bridge"
 ln -sf "$INSTALL_DIR/.venv/bin/dlive-test-send" "$BIN_DIR/dlive-test-send"
 
+# Also symlink into /usr/local/bin so 'dlive' works immediately (already on PATH)
+SYS_BIN="/usr/local/bin"
+if [[ -d "$SYS_BIN" ]]; then
+    if [[ -w "$SYS_BIN" ]]; then
+        ln -sf "$INSTALL_DIR/.venv/bin/dlive" "$SYS_BIN/dlive"
+    else
+        sudo ln -sf "$INSTALL_DIR/.venv/bin/dlive" "$SYS_BIN/dlive" 2>/dev/null || true
+    fi
+fi
+
+# Also add to shell RC as a fallback
 if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
-    echo ""
-    echo "  Adding $BIN_DIR to your PATH..."
     SHELL_NAME="$(basename "$SHELL")"
     case "$SHELL_NAME" in
         zsh)  RC_FILE="$HOME/.zshrc" ;;
@@ -175,23 +184,5 @@ else
     "$BIN_DIR/dlive" setup < /dev/tty
 fi
 
-# ── Make sure 'dlive' works in this session ──────────────────────────
-
 echo ""
-if command -v dlive &>/dev/null; then
-    echo "  ✓ 'dlive' is ready to use."
-else
-    SHELL_NAME="$(basename "$SHELL")"
-    case "$SHELL_NAME" in
-        zsh)  RC_CMD="source ~/.zshrc" ;;
-        bash) RC_CMD="source ~/.bashrc" ;;
-        *)    RC_CMD="source ~/.profile" ;;
-    esac
-    echo "  ══════════════════════════════════════════════════════"
-    echo "    IMPORTANT: Run this command to activate 'dlive':"
-    echo ""
-    echo "      $RC_CMD"
-    echo ""
-    echo "    Then try:  dlive status"
-    echo "  ══════════════════════════════════════════════════════"
-fi
+echo "  ✓ 'dlive' is ready to use. Try:  dlive status"
