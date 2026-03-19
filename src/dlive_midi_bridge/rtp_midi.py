@@ -91,6 +91,7 @@ class AppleMIDISession:
         self._data_transport: Optional[asyncio.DatagramTransport] = None
         self._sync_task: Optional[asyncio.Task] = None
         self._sequence = 0
+        self._tx_count = 0
 
     # ── Protocol message builders ────────────────────────────────────
 
@@ -117,8 +118,9 @@ class AppleMIDISession:
         ) + name_bytes
 
     def _build_sync(self, count: int, timestamps: list[int]) -> bytes:
+        # Apple MIDI CK format: sig(2) + cmd(2) + SSRC(4) + count(1) + pad(3) + 3×ts(24) = 36 bytes
         pkt = struct.pack(
-            ">HHIB",
+            ">HHIB3x",
             APPLEMIDI_SIGNATURE,
             CMD_SYNC,
             self.ssrc,
@@ -203,29 +205,41 @@ class AppleMIDISession:
 
     @staticmethod
     def _strip_delta_times(data: bytes) -> bytes:
-        """Strip variable-length delta-time values from the MIDI command list."""
+        """Strip variable-length delta-time values from the MIDI command list.
+
+        RTP-MIDI delta-times use VLQ encoding (high bit = continuation)
+        interleaved before each MIDI command.  We need to skip them to
+        extract raw MIDI bytes.
+        """
         result = bytearray()
         i = 0
         running_status = 0
+        first_cmd = True
 
         while i < len(data):
-            while i < len(data) and (data[i] & 0x80) and data[i] < 0x80:
-                i += 1
-            if i < len(data) and data[i] < 0x80:
-                i += 1
+            # Skip VLQ delta-time (continuation bytes have bit 7 set,
+            # final byte has bit 7 clear).  The first command always
+            # has a delta-time when Z=1; subsequent commands may too.
+            if first_cmd or (i < len(data) and data[i] < 0x80):
+                # Skip final VLQ byte (bit 7 clear)
+                while i < len(data) and data[i] & 0x80 and data[i] < 0xF0:
+                    i += 1
+                if i < len(data) and data[i] < 0x80:
+                    i += 1
+                first_cmd = False
 
             if i >= len(data):
                 break
 
-            status = data[i]
-            if status & 0x80:
-                running_status = status
-                result.append(status)
+            b = data[i]
+            if b & 0x80:
+                running_status = b
+                result.append(b)
                 i += 1
             else:
                 if running_status:
                     result.append(running_status)
-                result.append(data[i])
+                result.append(b)
                 i += 1
 
             while i < len(data) and not (data[i] & 0x80):
@@ -284,10 +298,19 @@ class AppleMIDISession:
         for peer in sendable:
             try:
                 self._data_transport.sendto(packet, peer.data_addr)
-                logger.info(
-                    f"RTP-MIDI tx → {peer.data_addr[0]}:{peer.data_addr[1]} "
-                    f"[{len(data)} bytes]: {data.hex(' ')}"
-                )
+                self._tx_count += 1
+                if self._tx_count <= 3:
+                    logger.info(
+                        f"*** RTP-MIDI tx #{self._tx_count} → "
+                        f"{peer.data_addr[0]}:{peer.data_addr[1]} "
+                        f"[{len(data)} bytes]: {data.hex(' ')} "
+                        f"(pkt {len(packet)} bytes) ***"
+                    )
+                else:
+                    logger.info(
+                        f"RTP-MIDI tx → {peer.data_addr[0]}:{peer.data_addr[1]} "
+                        f"[{len(data)} bytes]: {data.hex(' ')}"
+                    )
             except Exception as e:
                 logger.warning(f"RTP-MIDI send to {peer.data_addr} failed: {e}")
 
@@ -455,19 +478,26 @@ class AppleMIDISession:
             )
 
         elif cmd == CMD_SYNC:
-            if len(data) >= 36:
-                _, _, sender_ssrc, count = struct.unpack(">HHIB", data[:9])
-                ts1 = struct.unpack(">Q", data[9:17])[0]
-                ts2 = struct.unpack(">Q", data[17:25])[0]
-                ts3 = struct.unpack(">Q", data[25:33])[0]
+            # Standard CK: 36 bytes (with 3-byte pad after count)
+            # Accept 33+ bytes for compat with non-standard peers
+            if len(data) >= 33:
+                sender_ssrc = struct.unpack(">I", data[4:8])[0]
+                count = data[8]
+                # Standard layout: timestamps at offset 12 (after 3 pad bytes)
+                ts_off = 12 if len(data) >= 36 else 9
+                ts1 = struct.unpack(">Q", data[ts_off:ts_off + 8])[0]
+                ts2 = struct.unpack(">Q", data[ts_off + 8:ts_off + 16])[0]
+                ts3 = struct.unpack(">Q", data[ts_off + 16:ts_off + 24])[0]
 
                 now = self._now_ts()
                 if count == 0:
                     reply = self._build_sync(1, [ts1, now, 0])
                     reply_transport.sendto(reply, addr)
+                    logger.debug(f"Sync CK0→CK1 with {addr}")
                 elif count == 1:
                     reply = self._build_sync(2, [ts1, ts2, now])
                     reply_transport.sendto(reply, addr)
+                    logger.debug(f"Sync CK1→CK2 with {addr}")
 
         elif cmd == CMD_BYE:
             ctrl_key = (addr[0], addr[1] - 1) if is_data_port else (addr[0], addr[1])

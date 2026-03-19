@@ -416,10 +416,24 @@ def _handle_peers():
                 lines.append(f"    Network → dLive:   {midi_in} messages")
                 lines.append(f"    dLive → Network:   {midi_out} messages")
                 lines.append(f"    Active Sense (rx): {as_rx}")
-                if midi_out == 0 and as_rx > 0:
+
+                if not dlive_ok:
                     lines.append("")
-                    lines.append("  ⚠ dLive is connected but has sent 0 MIDI messages.")
-                    lines.append("    Check dLive: Utility → MIDI → enable TCP MIDI Output")
+                    lines.append("  ✗ dLive TCP connection FAILED")
+                    lines.append("    Check: is the dLive IP correct and reachable?")
+                    lines.append(f"    Try: ping {dlive.get('host', '?')}")
+                elif as_rx < 5:
+                    lines.append("")
+                    lines.append("  ⚠ dLive TCP seems unhealthy (very few Active Sense)")
+                    lines.append("    Expected: hundreds. Got: " + str(as_rx))
+                    lines.append("    Check: is the Pi on the same subnet as the dLive?")
+                elif midi_out == 0:
+                    lines.append("")
+                    lines.append("  ⚠ dLive connected but has sent 0 MIDI messages.")
+                    lines.append("    dLive only sends MIDI for console-originated events")
+                    lines.append("    (scene recalls, fader moves, etc.)")
+                    lines.append("    Check: Utility → MIDI → enable TCP MIDI Output")
+
                 lines.append("")
                 lines.append(f"  Updated: {int(age)}s ago")
 

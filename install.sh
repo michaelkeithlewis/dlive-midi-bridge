@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="0.6.6"
+VERSION="0.7.0"
 REPO_URL="https://github.com/michaelkeithlewis/dlive-midi-bridge.git"
 INSTALL_DIR="$HOME/.local/share/dlive-midi-bridge"
 BIN_DIR="$HOME/.local/bin"
