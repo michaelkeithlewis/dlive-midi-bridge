@@ -11,13 +11,14 @@
 
 set -euo pipefail
 
+VERSION="0.5.3"
 REPO_URL="https://github.com/michaelkeithlewis/dlive-midi-bridge.git"
 INSTALL_DIR="$HOME/.local/share/dlive-midi-bridge"
 BIN_DIR="$HOME/.local/bin"
 
 echo ""
 echo "  ══════════════════════════════════════════════════════"
-echo "    dLive MIDI Bridge — Installer"
+echo "    dLive MIDI Bridge — Installer  v${VERSION}"
 echo "    https://github.com/michaelkeithlewis/dlive-midi-bridge"
 echo "  ══════════════════════════════════════════════════════"
 echo ""
