@@ -12,25 +12,44 @@ Architecture:
   - Each received message is forwarded via the midi_callback
 """
 
+import ctypes
 import logging
 import os
 import subprocess
+import sys
 import threading
 import time
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-_alsa_init_attempted = False
+_rtmidi_available: Optional[bool] = None
+_rtmidi_module = None
+
+
+def _suppress_stderr():
+    """Redirect stderr at the file-descriptor level to silence C library messages."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        saved = os.dup(2)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+        return saved
+    except Exception:
+        return None
+
+
+def _restore_stderr(saved):
+    if saved is not None:
+        try:
+            os.dup2(saved, 2)
+            os.close(saved)
+        except Exception:
+            pass
 
 
 def _ensure_alsa_sequencer():
     """On Linux, try to load the snd-seq kernel module if /dev/snd/seq is missing."""
-    global _alsa_init_attempted
-    if _alsa_init_attempted:
-        return
-    _alsa_init_attempted = True
-
     import platform
     if platform.system() != "Linux":
         return
@@ -49,14 +68,44 @@ def _ensure_alsa_sequencer():
 
 
 def _get_rtmidi():
-    """Import rtmidi, ensuring ALSA is set up first. Returns None on failure."""
+    """
+    Import rtmidi and verify it can actually create a MIDI client.
+    Caches the result so ALSA errors only appear once (if at all).
+    Returns the rtmidi module, or None if MIDI isn't available.
+    """
+    global _rtmidi_available, _rtmidi_module
+
+    if _rtmidi_available is not None:
+        return _rtmidi_module
+
     _ensure_alsa_sequencer()
+
     try:
         import rtmidi
-        return rtmidi
-    except Exception as e:
-        logger.warning(f"python-rtmidi unavailable: {e}")
+    except ImportError as e:
+        logger.warning(f"python-rtmidi not installed: {e}")
+        _rtmidi_available = False
         return None
+
+    # Actually try to create a client — suppress the C-level ALSA error on stderr
+    saved = _suppress_stderr()
+    try:
+        probe = rtmidi.MidiIn()
+        probe.close_port()
+        del probe
+        _rtmidi_module = rtmidi
+        _rtmidi_available = True
+        logger.debug("MIDI subsystem available")
+    except Exception as e:
+        _rtmidi_available = False
+        _rtmidi_module = None
+        _restore_stderr(saved)
+        logger.info(f"MIDI subsystem not available (no sound hardware?): {e}")
+        return None
+    finally:
+        _restore_stderr(saved)
+
+    return _rtmidi_module
 
 HOTPLUG_POLL_INTERVAL = 3.0
 
