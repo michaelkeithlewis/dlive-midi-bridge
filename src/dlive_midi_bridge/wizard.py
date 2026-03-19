@@ -680,45 +680,51 @@ def _install_launchd(config_path: Path):
 
 def _install_systemd(config_path: Path):
     is_root = os.geteuid() == 0
+    sudo = [] if is_root else ["sudo"]
 
-    if not is_root:
-        warn("systemd service install requires root.")
-        warn("Re-run with: sudo dlive setup")
-        return
-
-    service_src = Path(__file__).parent.parent.parent / "systemd" / "dlive-midi-bridge.service"
+    exe = _find_exe() or "/usr/local/bin/dlive"
+    username = os.environ.get("SUDO_USER") or os.environ.get("USER") or "pi"
     service_dest = Path("/etc/systemd/system/dlive-midi-bridge.service")
 
-    if service_src.exists():
-        shutil.copy2(service_src, service_dest)
-    else:
-        exe = _find_exe() or "/usr/local/bin/dlive-midi-bridge"
-        service_dest.write_text(textwrap.dedent(f"""\
-            [Unit]
-            Description=dLive MIDI Bridge — RTP-MIDI to Allen & Heath dLive TCP
-            After=network-online.target avahi-daemon.service
-            Wants=network-online.target avahi-daemon.service
+    service_content = textwrap.dedent(f"""\
+        [Unit]
+        Description=dLive MIDI Bridge — RTP-MIDI to Allen & Heath dLive TCP
+        After=network-online.target avahi-daemon.service
+        Wants=network-online.target avahi-daemon.service
 
-            [Service]
-            Type=simple
-            User=dlive-bridge
-            Group=dlive-bridge
-            ExecStart={exe} run --config {config_path}
-            Restart=always
-            RestartSec=5
+        [Service]
+        Type=simple
+        User={username}
+        ExecStart={exe} run --config {config_path}
+        Restart=always
+        RestartSec=5
 
-            [Install]
-            WantedBy=multi-user.target
-        """))
+        [Install]
+        WantedBy=multi-user.target
+    """)
+
+    # Write service file (needs root)
+    tmp = Path(f"/tmp/dlive-midi-bridge.service")
+    tmp.write_text(service_content)
+    result = subprocess.run(
+        sudo + ["cp", str(tmp), str(service_dest)],
+        capture_output=True, text=True,
+    )
+    tmp.unlink(missing_ok=True)
+
+    if result.returncode != 0:
+        warn(f"Could not install service: {result.stderr.strip()}")
+        warn("Try: sudo dlive setup")
+        return
 
     ok(f"Service file installed at {service_dest}")
 
-    subprocess.run(["systemctl", "daemon-reload"], check=False)
-    subprocess.run(["systemctl", "enable", "dlive-midi-bridge"], check=False)
+    subprocess.run(sudo + ["systemctl", "daemon-reload"], check=False)
+    subprocess.run(sudo + ["systemctl", "enable", "dlive-midi-bridge"], check=False)
     ok("Service enabled (starts on boot)")
 
     if ask_yes_no("Start the bridge now?", default=True):
-        subprocess.run(["systemctl", "start", "dlive-midi-bridge"], check=False)
+        subprocess.run(sudo + ["systemctl", "start", "dlive-midi-bridge"], check=False)
         ok("Service started.")
         print()
         print("  View logs: journalctl -u dlive-midi-bridge -f")
