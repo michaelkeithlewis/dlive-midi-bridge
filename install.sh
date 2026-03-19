@@ -153,7 +153,6 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     fi
 
     export PATH="$BIN_DIR:$PATH"
-    echo "  Added to $RC_FILE (restart your shell or run: source $RC_FILE)"
 fi
 
 # ── Done — launch wizard ────────────────────────────────────────────
@@ -174,4 +173,25 @@ else
     echo "  Launching setup wizard..."
     echo ""
     "$BIN_DIR/dlive" setup < /dev/tty
+fi
+
+# ── Make sure 'dlive' works in this session ──────────────────────────
+
+echo ""
+if command -v dlive &>/dev/null; then
+    echo "  ✓ 'dlive' is ready to use."
+else
+    SHELL_NAME="$(basename "$SHELL")"
+    case "$SHELL_NAME" in
+        zsh)  RC_CMD="source ~/.zshrc" ;;
+        bash) RC_CMD="source ~/.bashrc" ;;
+        *)    RC_CMD="source ~/.profile" ;;
+    esac
+    echo "  ══════════════════════════════════════════════════════"
+    echo "    IMPORTANT: Run this command to activate 'dlive':"
+    echo ""
+    echo "      $RC_CMD"
+    echo ""
+    echo "    Then try:  dlive status"
+    echo "  ══════════════════════════════════════════════════════"
 fi
