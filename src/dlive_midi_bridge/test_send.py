@@ -1,8 +1,5 @@
 """
-Send test MIDI messages directly to a dLive over TCP.
-
-Bypasses RTP-MIDI entirely — connects straight to the dLive's TCP port
-and sends program changes, CC messages, or note on/off for verification.
+Send test MIDI messages to a dLive over TCP, to the RTP-MIDI network, or both.
 
 Usage:
     dlive-test-send                                      # interactive mode
@@ -15,6 +12,7 @@ import logging
 import sys
 
 from .dlive_tcp import DLiveTCPConnection, DLIVE_MIXRACK_PORT
+from .rtp_midi import RTPMIDIReceiver
 
 
 logger = logging.getLogger(__name__)
@@ -94,7 +92,7 @@ async def _connect(ip: str, port: int) -> DLiveTCPConnection:
         connected_event.set()
 
     conn = DLiveTCPConnection(host=ip, port=port, on_connected=on_connected)
-    print(f"\n  Connecting to {ip}:{port}...")
+    print(f"\n  Connecting to dLive at {ip}:{port}...")
     await conn.connect()
 
     try:
@@ -105,8 +103,41 @@ async def _connect(ip: str, port: int) -> DLiveTCPConnection:
         await conn.disconnect()
         sys.exit(1)
 
-    print("  Connected!\n")
+    print("  ✓ dLive connected!\n")
     return conn
+
+
+async def _connect_rtp(session_name: str, local_port: int,
+                       bind_ip: str = None) -> RTPMIDIReceiver:
+    """Start an RTP-MIDI session for sending test messages to the network."""
+    # Use an offset port to avoid conflicting with the running bridge service
+    test_port = local_port + 10
+
+    receiver = RTPMIDIReceiver(
+        midi_callback=lambda data: None,
+        session_name=f"{session_name}-test",
+        local_port=test_port,
+        bind_ip=bind_ip,
+    )
+    print(f"  Starting RTP-MIDI session '{session_name}-test' on port {test_port}...")
+    await receiver.start()
+
+    # Give Bonjour time to discover peers
+    print("  Waiting for network peers...", end="", flush=True)
+    for i in range(30):
+        await asyncio.sleep(0.5)
+        if receiver._session and receiver._session.has_connected_peers:
+            break
+        if i % 4 == 3:
+            print(".", end="", flush=True)
+
+    if receiver._session and receiver._session.has_connected_peers:
+        count = sum(1 for p in receiver._session._peers.values() if p.connected)
+        print(f"\n  ✓ {count} RTP-MIDI peer(s) connected!\n")
+    else:
+        print(f"\n  ⚠ No RTP-MIDI peers found yet (messages will send when peers connect)\n")
+
+    return receiver
 
 
 def _load_saved_config() -> dict:
@@ -155,59 +186,83 @@ async def run_interactive():
     print(TRUCK_PACKER_BANNER)
     print("  ── dLive Test Sender ─────────────────────────────\n")
 
-    # Warn if the bridge service is already running
-    if _check_service_running():
-        print("  NOTE: The bridge service is currently running.")
-        print("  Test messages will go to the dLive AND get echoed")
-        print("  back to all connected MIDI peers on the network.\n")
-
     # Load saved config for defaults
     saved = _load_saved_config()
     default_ip = saved.get("dlive_ip", "192.168.1.70")
     default_ch = saved.get("midi_channel", 1)
+    session_name = saved.get("session_name", "dLive-MIDI-Bridge")
+    bind_ip = saved.get("bind_ip")
 
-    # Offer network scan or use saved IP
-    ip = None
-    if default_ip:
-        use_saved = _ask(f"dLive IP address", default_ip)
-        if use_saved:
-            ip = use_saved
+    # Choose where to send
+    dest = _ask_choice("Where do you want to send MIDI?", [
+        ("both",    "dLive + Network  (TCP to console AND RTP-MIDI to all peers)"),
+        ("dlive",   "dLive only       (TCP direct to the console)"),
+        ("network", "Network only     (RTP-MIDI to connected peers like iConnectivity)"),
+    ])
+    print()
 
-    if not ip:
-        try:
-            from .wizard import scan_for_dlive
-            scan = _ask("Scan all networks for dLive? (Y/n)", "Y").lower()
-            if scan in ("y", "yes", ""):
-                print(f"  Scanning all interfaces ...", end="", flush=True)
-                found = scan_for_dlive(
-                    progress_callback=lambda d, t: print(
-                        f"\r  Scanning all interfaces ... {int(d/t*100)}%",
-                        end="", flush=True,
+    conn = None
+    rtp = None
+
+    if dest in ("both", "dlive"):
+        ip = None
+        if default_ip:
+            use_saved = _ask(f"dLive IP address", default_ip)
+            if use_saved:
+                ip = use_saved
+
+        if not ip:
+            try:
+                from .wizard import scan_for_dlive
+                scan = _ask("Scan all networks for dLive? (Y/n)", "Y").lower()
+                if scan in ("y", "yes", ""):
+                    print(f"  Scanning all interfaces ...", end="", flush=True)
+                    found = scan_for_dlive(
+                        progress_callback=lambda d, t: print(
+                            f"\r  Scanning all interfaces ... {int(d/t*100)}%",
+                            end="", flush=True,
+                        )
                     )
-                )
-                print(f"\r  Scanning all interfaces ... done!   \n")
-                if found:
-                    if len(found) == 1:
-                        ip = found[0][0]
-                        print(f"  Found: {found[0][2]} at {ip}:{found[0][1]}\n")
+                    print(f"\r  Scanning all interfaces ... done!   \n")
+                    if found:
+                        if len(found) == 1:
+                            ip = found[0][0]
+                            print(f"  Found: {found[0][2]} at {ip}:{found[0][1]}\n")
+                        else:
+                            options = [
+                                (fip, f"{fip}  ({ftype}, port {fport})")
+                                for fip, fport, ftype in found
+                            ]
+                            ip = _ask_choice("Which dLive?", options)
                     else:
-                        options = [
-                            (fip, f"{fip}  ({ftype}, port {fport})")
-                            for fip, fport, ftype in found
-                        ]
-                        ip = _ask_choice("Which dLive?", options)
-                else:
-                    print("  No dLive consoles found. Enter the IP manually.\n")
-        except ImportError:
-            pass
+                        print("  No dLive consoles found. Enter the IP manually.\n")
+            except ImportError:
+                pass
 
-    if not ip:
-        ip = _ask("dLive IP address", default_ip)
-    port = DLIVE_MIXRACK_PORT
+        if not ip:
+            ip = _ask("dLive IP address", default_ip)
+        conn = await _connect(ip, DLIVE_MIXRACK_PORT)
+
+    if dest in ("both", "network"):
+        rtp = await _connect_rtp(session_name, 5004, bind_ip)
+
     channel = _ask_int("MIDI channel", default_ch, 1, 16)
     ch_zero = channel - 1
 
-    conn = await _connect(ip, port)
+    def _send(msg: bytes):
+        """Send to whichever destinations are active."""
+        targets = []
+        if conn:
+            conn.send_midi(msg)
+            targets.append("dLive")
+        if rtp:
+            rtp.send_midi(msg)
+            targets.append("network")
+        return " + ".join(targets)
+
+    async def _flush():
+        if conn:
+            await conn.flush()
 
     while True:
         msg_type = _ask_choice("What do you want to send?", [
@@ -220,29 +275,32 @@ async def run_interactive():
         if msg_type == "pc":
             prog = _ask_int("Program number", 0, 0, 127)
             msg = build_program_change(ch_zero, prog)
-            conn.send_midi(msg)
-            await conn.flush()
-            print(f"\n  >> Program Change -> {prog} on ch {channel}  [{msg.hex(' ')}]\n")
+            sent_to = _send(msg)
+            await _flush()
+            print(f"\n  >> Program Change -> {prog} on ch {channel}  [{msg.hex(' ')}]")
+            print(f"     Sent to: {sent_to}\n")
 
         elif msg_type == "cc":
             cc_num = _ask_int("Controller number (e.g. 7=volume, 10=pan)", 7, 0, 127)
             cc_val = _ask_int("Value", 127, 0, 127)
             msg = build_cc(ch_zero, cc_num, cc_val)
-            conn.send_midi(msg)
-            await conn.flush()
-            print(f"\n  >> CC {cc_num} = {cc_val} on ch {channel}  [{msg.hex(' ')}]\n")
+            sent_to = _send(msg)
+            await _flush()
+            print(f"\n  >> CC {cc_num} = {cc_val} on ch {channel}  [{msg.hex(' ')}]")
+            print(f"     Sent to: {sent_to}\n")
 
         elif msg_type == "note":
             note = _ask_int("Note number (60=middle C)", 60, 0, 127)
             vel = _ask_int("Velocity", 100, 0, 127)
             msg_on = build_note_on(ch_zero, note, vel)
-            conn.send_midi(msg_on)
-            await conn.flush()
+            sent_to = _send(msg_on)
+            await _flush()
             print(f"\n  >> Note On {note} vel={vel} on ch {channel}  [{msg_on.hex(' ')}]")
+            print(f"     Sent to: {sent_to}")
             await asyncio.sleep(1.0)
             msg_off = build_note_off(ch_zero, note)
-            conn.send_midi(msg_off)
-            await conn.flush()
+            _send(msg_off)
+            await _flush()
             print(f"  >> Note Off {note} on ch {channel}  [{msg_off.hex(' ')}]\n")
 
         elif msg_type == "sweep":
@@ -250,8 +308,8 @@ async def run_interactive():
             print(f"\n  Sweeping Program Changes 0-{sweep_max}...")
             for prog in range(sweep_max + 1):
                 msg = build_program_change(ch_zero, prog)
-                conn.send_midi(msg)
-                await conn.flush()
+                _send(msg)
+                await _flush()
                 print(f"    PC -> {prog}  [{msg.hex(' ')}]")
                 await asyncio.sleep(1.0)
             print()
@@ -262,7 +320,10 @@ async def run_interactive():
         print()
 
     print("\n  Disconnecting.")
-    await conn.disconnect()
+    if conn:
+        await conn.disconnect()
+    if rtp:
+        await rtp.stop()
 
 
 # ── Scripted (CLI flags) mode ────────────────────────────────────────
