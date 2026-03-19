@@ -679,23 +679,44 @@ class BonjourMIDIAdvertiser:
             logger.warning("Could not determine local IP for Bonjour advertisement")
             return
 
-        try:
-            self._info = ServiceInfo(
-                self.SERVICE_TYPE,
-                f"{self.name}.{self.SERVICE_TYPE}",
-                addresses=[_socket.inet_aton(ip_addr)],
-                port=self.port,
-                properties={},
-            )
-            self._zeroconf = Zeroconf(**zeroconf_kwargs)
-            self._zeroconf.register_service(self._info)
-            logger.info(
-                f"Advertising RTP-MIDI session '{self.name}' on {ip_addr}:{self.port}"
-            )
-        except Exception as e:
-            logger.warning(f"Bonjour advertisement failed: {e}")
-            self._zeroconf = None
-            self._info = None
+        logger.info(f"Bonjour: advertising '{self.name}' on {ip_addr}:{self.port}")
+        if zeroconf_kwargs:
+            logger.info(f"Bonjour: zeroconf kwargs: {zeroconf_kwargs}")
+
+        # Try with interface-scoped Zeroconf first, fall back to default
+        for attempt, kw in enumerate([zeroconf_kwargs, {}]):
+            try:
+                self._info = ServiceInfo(
+                    self.SERVICE_TYPE,
+                    f"{self.name}.{self.SERVICE_TYPE}",
+                    addresses=[_socket.inet_aton(ip_addr)],
+                    port=self.port,
+                    properties={},
+                )
+                self._zeroconf = Zeroconf(**kw)
+                self._zeroconf.register_service(self._info)
+                logger.info(
+                    f"Bonjour advertisement active: '{self.name}' "
+                    f"on {ip_addr}:{self.port}"
+                    + (f" (attempt {attempt + 1})" if attempt > 0 else "")
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    f"Bonjour advertisement attempt {attempt + 1} failed: {e}"
+                )
+                if self._zeroconf:
+                    try:
+                        self._zeroconf.close()
+                    except Exception:
+                        pass
+                self._zeroconf = None
+                self._info = None
+
+        logger.error(
+            "Bonjour advertisement FAILED — peers cannot discover this bridge. "
+            "Check that avahi-daemon is running: sudo systemctl start avahi-daemon"
+        )
 
     def stop(self):
         if self._zeroconf and self._info:

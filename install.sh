@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="0.6.3"
+VERSION="0.6.4"
 REPO_URL="https://github.com/michaelkeithlewis/dlive-midi-bridge.git"
 INSTALL_DIR="$HOME/.local/share/dlive-midi-bridge"
 BIN_DIR="$HOME/.local/bin"
@@ -95,6 +95,11 @@ if [[ "$PLATFORM" == "linux" ]]; then
     # pip needs pkg-config for some native builds
     command -v pkg-config &>/dev/null || missing+=(pkg-config)
 
+    # avahi-daemon is required for Bonjour/mDNS (network MIDI discovery)
+    if ! systemctl is-active avahi-daemon &>/dev/null 2>&1; then
+        dpkg -s avahi-daemon &>/dev/null 2>&1 || missing+=(avahi-daemon)
+    fi
+
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo ""
         echo "  Installing system packages: ${missing[*]}"
@@ -104,6 +109,18 @@ if [[ "$PLATFORM" == "linux" ]]; then
         else
             sudo apt-get update -qq
             sudo apt-get install -y -qq "${missing[@]}"
+        fi
+    fi
+
+    # Ensure avahi-daemon is running (required for Bonjour/mDNS discovery)
+    if ! systemctl is-active avahi-daemon &>/dev/null 2>&1; then
+        echo "  Starting avahi-daemon (Bonjour/mDNS)..."
+        if [[ $EUID -eq 0 ]]; then
+            systemctl enable avahi-daemon 2>/dev/null || true
+            systemctl start avahi-daemon 2>/dev/null || true
+        else
+            sudo systemctl enable avahi-daemon 2>/dev/null || true
+            sudo systemctl start avahi-daemon 2>/dev/null || true
         fi
     fi
 
