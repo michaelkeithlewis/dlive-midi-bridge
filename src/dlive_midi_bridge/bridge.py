@@ -315,16 +315,17 @@ class MIDIBridge:
         rtp_peers = 0
         if self._receiver and self._receiver._session:
             for addr, p in self._receiver._session._peers.items():
-                connected = bool(p.connected)
                 peers_list.append({
                     "host": addr[0],
                     "port": addr[1],
-                    "connected": connected,
+                    "connected": bool(p.connected),
+                    "can_send": bool(p.can_send),
                     "ctrl_ok": bool(p.ctrl_ok),
                     "data_ok": bool(p.data_ok),
                     "data_addr": f"{p.data_addr[0]}:{p.data_addr[1]}",
+                    "rx_count": p.rx_count,
                 })
-                if connected:
+                if p.can_send:
                     rtp_peers += 1
 
         logger.info(
@@ -335,12 +336,13 @@ class MIDIBridge:
             f"Active Sense rx={stats.get('active_sense_received', 0)}"
         )
         for p in peers_list:
-            state = "CONNECTED" if p["connected"] else "PARTIAL"
+            state = "CAN_SEND" if p["can_send"] else "NO_SEND"
             ctrl = "✓" if p["ctrl_ok"] else "·"
             data = "✓" if p["data_ok"] else "·"
             logger.info(
                 f"    Peer {p['host']}:{p['port']} = {state} "
-                f"(ctrl={ctrl} data={data} send_to={p['data_addr']})"
+                f"ctrl={ctrl} data={data} "
+                f"rx={p['rx_count']} tx_to={p['data_addr']}"
             )
 
         self._write_status_file(dlive_status, rtp_peers, peers_list, stats)

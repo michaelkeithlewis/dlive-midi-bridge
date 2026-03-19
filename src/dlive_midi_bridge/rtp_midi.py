@@ -45,15 +45,24 @@ RTP_MIDI_PAYLOAD_TYPE = 97
 class _PeerInfo:
     """State for a single connected RTP-MIDI peer."""
 
-    __slots__ = ("addr", "ssrc", "connected", "data_addr", "ctrl_ok", "data_ok")
+    __slots__ = ("addr", "ssrc", "data_addr", "ctrl_ok", "data_ok", "rx_count")
 
     def __init__(self, addr: tuple[str, int], ssrc: int = 0):
         self.addr = addr                                    # (host, control_port)
         self.ssrc = ssrc
-        self.connected = False
-        self.data_addr = (addr[0], addr[1] + 1)            # (host, data_port) — updated on first data-port contact
-        self.ctrl_ok = False                                # control-port handshake done
-        self.data_ok = False                                # data-port handshake done
+        self.data_addr = (addr[0], addr[1] + 1)            # updated on first data-port contact
+        self.ctrl_ok = False
+        self.data_ok = False
+        self.rx_count = 0                                   # MIDI messages received from this peer
+
+    @property
+    def can_send(self) -> bool:
+        """Can we send to this peer? Yes if we've had ANY interaction."""
+        return self.ctrl_ok or self.data_ok
+
+    @property
+    def connected(self) -> bool:
+        return self.ctrl_ok or self.data_ok
 
 
 class AppleMIDISession:
@@ -253,19 +262,21 @@ class AppleMIDISession:
         return rtp_header + midi_header + midi_data
 
     def send_midi(self, data: bytes):
-        """Broadcast MIDI bytes to every known peer that has any handshake progress."""
+        """Broadcast MIDI bytes to every known peer."""
         if not self._data_transport:
             logger.warning("send_midi: no data transport bound")
             return
 
-        # Send to any peer that has at least started the handshake
-        # (ctrl_ok or data_ok). Being strict about requiring both
-        # breaks devices like iConnectivity MIO XM that have non-standard flows.
-        sendable = [p for p in self._peers.values() if p.ctrl_ok or p.data_ok]
+        sendable = [p for p in self._peers.values() if p.can_send]
         if not sendable:
-            logger.info(
-                f"send_midi: no RTP-MIDI peers ready — MIDI not forwarded "
-                f"(tracked: {len(self._peers)})"
+            # Log details about every tracked peer so we can diagnose
+            for addr, p in self._peers.items():
+                logger.warning(
+                    f"  Peer {addr}: ctrl={p.ctrl_ok} data={p.data_ok} "
+                    f"data_addr={p.data_addr} rx={p.rx_count}"
+                )
+            logger.warning(
+                f"send_midi: 0 sendable peers out of {len(self._peers)} tracked"
             )
             return
 
@@ -275,13 +286,22 @@ class AppleMIDISession:
                 self._data_transport.sendto(packet, peer.data_addr)
                 logger.info(
                     f"RTP-MIDI tx → {peer.data_addr[0]}:{peer.data_addr[1]} "
-                    f"[{len(data)} bytes]: {data.hex(' ')} "
-                    f"(ctrl={'✓' if peer.ctrl_ok else '·'} data={'✓' if peer.data_ok else '·'})"
+                    f"[{len(data)} bytes]: {data.hex(' ')}"
                 )
             except Exception as e:
                 logger.warning(f"RTP-MIDI send to {peer.data_addr} failed: {e}")
 
     # ── Peer management ──────────────────────────────────────────────
+
+    def _find_peer_by_data_addr(self, addr: tuple) -> Optional[_PeerInfo]:
+        """Find a peer by data port address. Try port-1 first, then IP match."""
+        ctrl_key = (addr[0], addr[1] - 1)
+        if ctrl_key in self._peers:
+            return self._peers[ctrl_key]
+        for key, p in self._peers.items():
+            if key[0] == addr[0]:
+                return p
+        return None
 
     def _get_or_create_peer(self, addr: tuple) -> _PeerInfo:
         key = (addr[0], addr[1])
@@ -472,25 +492,16 @@ class AppleMIDISession:
                 return
 
         # Actual RTP MIDI data — find the peer and capture real data address.
-        # Try exact ctrl_port = data_port - 1 first, then fall back to IP match.
-        peer = None
-        ctrl_key = (addr[0], addr[1] - 1)
-        if ctrl_key in self._peers:
-            peer = self._peers[ctrl_key]
-        else:
-            for key, p in self._peers.items():
-                if key[0] == addr[0]:
-                    peer = p
-                    break
+        peer = self._find_peer_by_data_addr(addr)
 
         if peer:
             peer.data_addr = addr
-            if not peer.data_ok:
-                peer.data_ok = True
-                peer.connected = peer.ctrl_ok and peer.data_ok
+            peer.data_ok = True
+            peer.rx_count += 1
+            if peer.rx_count == 1:
                 logger.info(
-                    f"Peer {peer.addr} data channel active "
-                    f"(data_addr={addr}, connected={peer.connected})"
+                    f"*** First MIDI from peer {peer.addr} "
+                    f"(data_addr={addr}) — return path active ***"
                 )
 
         midi_bytes = self._extract_midi_from_rtp(data)

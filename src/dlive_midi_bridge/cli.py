@@ -387,29 +387,40 @@ def _handle_peers():
                 )
 
                 peers = rtp.get("peers", [])
-                connected = sum(1 for p in peers if p.get("connected"))
-                lines.append(f"  Peers:   {connected} connected / {len(peers)} discovered")
+                sendable = sum(1 for p in peers if p.get("can_send"))
+                lines.append(f"  Peers:   {sendable} sendable / {len(peers)} discovered")
                 lines.append("")
 
                 if peers:
-                    lines.append("  ┌──────────────────────────────────────────────┐")
                     for p in peers:
-                        icon = "✓" if p.get("connected") else "·"
+                        icon = "✓" if p.get("can_send") else "·"
                         ctrl = "✓" if p.get("ctrl_ok") else "·"
                         dat = "✓" if p.get("data_ok") else "·"
                         send_to = p.get("data_addr", "?")
+                        rx = p.get("rx_count", 0)
                         lines.append(
-                            f"  │ {icon} {p['host']:<15s}:{p['port']:<5d} "
-                            f"ctrl={ctrl} data={dat}  tx→{send_to} │"
+                            f"    {icon} {p['host']}:{p['port']}"
                         )
-                    lines.append("  └──────────────────────────────────────────────┘")
+                        lines.append(
+                            f"      ctrl={ctrl}  data={dat}  "
+                            f"rx={rx}  tx→ {send_to}"
+                        )
                 else:
                     lines.append("  (no peers — waiting for Bonjour discovery)")
 
                 lines.append("")
                 midi_in = counters.get("midi_to_dlive", 0)
                 midi_out = counters.get("dlive_to_network", 0)
-                lines.append(f"  MIDI:    {midi_in} → dLive  |  {midi_out} ← dLive → network")
+                as_rx = counters.get("active_sense_rx", 0)
+                lines.append(f"  MIDI traffic:")
+                lines.append(f"    Network → dLive:   {midi_in} messages")
+                lines.append(f"    dLive → Network:   {midi_out} messages")
+                lines.append(f"    Active Sense (rx): {as_rx}")
+                if midi_out == 0 and as_rx > 0:
+                    lines.append("")
+                    lines.append("  ⚠ dLive is connected but has sent 0 MIDI messages.")
+                    lines.append("    Check dLive: Utility → MIDI → enable TCP MIDI Output")
+                lines.append("")
                 lines.append(f"  Updated: {int(age)}s ago")
 
             # Clear and redraw
