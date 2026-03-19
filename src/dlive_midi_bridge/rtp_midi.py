@@ -410,12 +410,10 @@ class AppleMIDISession:
             peer.ssrc = peer_ssrc
 
             if is_data_port:
-                peer.data_addr = addr  # capture the REAL data port address
+                peer.data_addr = addr
                 peer.data_ok = True
             else:
                 peer.ctrl_ok = True
-
-            peer.connected = peer.ctrl_ok and peer.data_ok
 
             logger.info(
                 f"Accepted invitation from {addr} "
@@ -423,7 +421,7 @@ class AppleMIDISession:
                 f"SSRC: {peer_ssrc:#x}, "
                 f"ctrl={'✓' if peer.ctrl_ok else '·'} "
                 f"data={'✓' if peer.data_ok else '·'} "
-                f"connected={peer.connected})"
+                f"can_send={peer.can_send})"
             )
             ack = self._build_invitation_ack(token)
             reply_transport.sendto(ack, addr)
@@ -442,12 +440,10 @@ class AppleMIDISession:
             peer.ssrc = peer_ssrc
 
             if is_data_port:
-                peer.data_addr = addr  # capture the REAL data port address
+                peer.data_addr = addr
                 peer.data_ok = True
             else:
                 peer.ctrl_ok = True
-
-            peer.connected = peer.ctrl_ok and peer.data_ok
 
             logger.info(
                 f"Invitation accepted by {addr} "
@@ -455,7 +451,7 @@ class AppleMIDISession:
                 f"SSRC: {peer_ssrc:#x}, "
                 f"ctrl={'✓' if peer.ctrl_ok else '·'} "
                 f"data={'✓' if peer.data_ok else '·'} "
-                f"connected={peer.connected})"
+                f"can_send={peer.can_send})"
             )
 
         elif cmd == CMD_SYNC:
@@ -476,7 +472,9 @@ class AppleMIDISession:
         elif cmd == CMD_BYE:
             ctrl_key = (addr[0], addr[1] - 1) if is_data_port else (addr[0], addr[1])
             if ctrl_key in self._peers:
-                self._peers[ctrl_key].connected = False
+                p = self._peers[ctrl_key]
+                p.ctrl_ok = False
+                p.data_ok = False
                 logger.info(f"Peer {ctrl_key} sent BYE")
 
     def _handle_control_message(self, data: bytes, addr: tuple):
