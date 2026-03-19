@@ -45,13 +45,15 @@ RTP_MIDI_PAYLOAD_TYPE = 97
 class _PeerInfo:
     """State for a single connected RTP-MIDI peer."""
 
-    __slots__ = ("addr", "ssrc", "connected", "data_addr")
+    __slots__ = ("addr", "ssrc", "connected", "data_addr", "ctrl_ok", "data_ok")
 
     def __init__(self, addr: tuple[str, int], ssrc: int = 0):
         self.addr = addr                                    # (host, control_port)
         self.ssrc = ssrc
         self.connected = False
-        self.data_addr = (addr[0], addr[1] + 1)            # (host, data_port)
+        self.data_addr = (addr[0], addr[1] + 1)            # (host, data_port) — updated on first data-port contact
+        self.ctrl_ok = False                                # control-port handshake done
+        self.data_ok = False                                # data-port handshake done
 
 
 class AppleMIDISession:
@@ -374,16 +376,28 @@ class AppleMIDISession:
             _, _, _ver, token, peer_ssrc = struct.unpack(">HHIII", data[:16])
             peer = self._get_or_create_peer(ctrl_addr)
             peer.ssrc = peer_ssrc
-            peer.connected = True
+
+            if is_data_port:
+                peer.data_addr = addr  # capture the REAL data port address
+                peer.data_ok = True
+            else:
+                peer.ctrl_ok = True
+
+            peer.connected = peer.ctrl_ok and peer.data_ok
+
             logger.info(
                 f"Accepted invitation from {addr} "
                 f"({'data' if is_data_port else 'control'} port, "
-                f"SSRC: {peer_ssrc:#x})"
+                f"SSRC: {peer_ssrc:#x}, "
+                f"ctrl={'✓' if peer.ctrl_ok else '·'} "
+                f"data={'✓' if peer.data_ok else '·'} "
+                f"connected={peer.connected})"
             )
             ack = self._build_invitation_ack(token)
             reply_transport.sendto(ack, addr)
 
-            # After accepting a control-port invitation, initiate data-port handshake
+            # After accepting a control-port invitation, send our own data-port
+            # invitation so the peer knows we want bidirectional data flow
             if not is_data_port:
                 loop = asyncio.get_event_loop()
                 loop.create_task(self._send_data_invitation(peer))
@@ -394,11 +408,22 @@ class AppleMIDISession:
             _, _, _ver, token, peer_ssrc = struct.unpack(">HHIII", data[:16])
             peer = self._get_or_create_peer(ctrl_addr)
             peer.ssrc = peer_ssrc
-            peer.connected = True
+
+            if is_data_port:
+                peer.data_addr = addr  # capture the REAL data port address
+                peer.data_ok = True
+            else:
+                peer.ctrl_ok = True
+
+            peer.connected = peer.ctrl_ok and peer.data_ok
+
             logger.info(
                 f"Invitation accepted by {addr} "
                 f"({'data' if is_data_port else 'control'} port, "
-                f"SSRC: {peer_ssrc:#x})"
+                f"SSRC: {peer_ssrc:#x}, "
+                f"ctrl={'✓' if peer.ctrl_ok else '·'} "
+                f"data={'✓' if peer.data_ok else '·'} "
+                f"connected={peer.connected})"
             )
 
         elif cmd == CMD_SYNC:
@@ -433,6 +458,21 @@ class AppleMIDISession:
                 if self._data_transport:
                     self._handle_apple_midi(data, addr, self._data_transport, is_data_port=True)
                 return
+
+        # Actual RTP MIDI data — capture the peer's real data address and
+        # ensure the peer is marked fully connected (some implementations
+        # skip the data-port invitation and jump straight to sending data)
+        ctrl_key = (addr[0], addr[1] - 1)
+        if ctrl_key in self._peers:
+            peer = self._peers[ctrl_key]
+            peer.data_addr = addr
+            if not peer.data_ok:
+                peer.data_ok = True
+                peer.connected = peer.ctrl_ok and peer.data_ok
+                logger.info(
+                    f"Peer {ctrl_key} data channel active "
+                    f"(data_addr={addr}, connected={peer.connected})"
+                )
 
         midi_bytes = self._extract_midi_from_rtp(data)
         if midi_bytes:

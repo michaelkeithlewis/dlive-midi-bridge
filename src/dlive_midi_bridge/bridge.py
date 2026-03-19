@@ -321,6 +321,9 @@ class MIDIBridge:
                     "host": addr[0],
                     "port": addr[1],
                     "connected": connected,
+                    "ctrl_ok": bool(p.ctrl_ok),
+                    "data_ok": bool(p.data_ok),
+                    "data_addr": f"{p.data_addr[0]}:{p.data_addr[1]}",
                 })
                 if connected:
                     rtp_peers += 1
@@ -333,8 +336,13 @@ class MIDIBridge:
             f"Active Sense rx={stats.get('active_sense_received', 0)}"
         )
         for p in peers_list:
-            state = "CONNECTED" if p["connected"] else "idle"
-            logger.info(f"    Peer {p['host']}:{p['port']} = {state}")
+            state = "CONNECTED" if p["connected"] else "PARTIAL"
+            ctrl = "✓" if p["ctrl_ok"] else "·"
+            data = "✓" if p["data_ok"] else "·"
+            logger.info(
+                f"    Peer {p['host']}:{p['port']} = {state} "
+                f"(ctrl={ctrl} data={data} send_to={p['data_addr']})"
+            )
 
         self._write_status_file(dlive_status, rtp_peers, peers_list, stats)
 
