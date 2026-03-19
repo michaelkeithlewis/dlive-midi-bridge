@@ -49,14 +49,23 @@ for cmd in python3 python; do
 done
 
 if [[ -z "$PYTHON" ]]; then
-    echo ""
-    echo "  ERROR: Python 3.9+ is required but not found."
-    if [[ "$PLATFORM" == "mac" ]]; then
-        echo "  Install it with: brew install python3"
+    if [[ "$PLATFORM" == "linux" ]]; then
+        echo ""
+        echo "  Python 3.9+ not found — installing..."
+        if [[ $EUID -eq 0 ]]; then
+            apt-get update -qq
+            apt-get install -y -qq python3 python3-venv python3-pip
+        else
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq python3 python3-venv python3-pip
+        fi
+        PYTHON="python3"
     else
-        echo "  Install it with: sudo apt install python3 python3-venv python3-pip"
+        echo ""
+        echo "  ERROR: Python 3.9+ is required but not found."
+        echo "  Install it with: brew install python3"
+        exit 1
     fi
-    exit 1
 fi
 
 echo "  Python:   $($PYTHON --version)"
@@ -68,6 +77,11 @@ if [[ "$PLATFORM" == "linux" ]]; then
     command -v git &>/dev/null || missing+=(git)
     $PYTHON -c "import venv" 2>/dev/null || missing+=(python3-venv)
 
+    # python-rtmidi compiles from source — needs C++ compiler and Python headers
+    command -v g++ &>/dev/null || missing+=(g++)
+    dpkg -s python3-dev &>/dev/null 2>&1 || missing+=(python3-dev)
+
+    # ALSA headers for MIDI on Linux
     if ! dpkg -s libasound2-dev &>/dev/null 2>&1 && \
        ! dpkg -s libasound-dev &>/dev/null 2>&1; then
         if apt-cache show libasound2-dev &>/dev/null 2>&1; then
@@ -76,6 +90,9 @@ if [[ "$PLATFORM" == "linux" ]]; then
             missing+=(libasound-dev)
         fi
     fi
+
+    # pip needs pkg-config for some native builds
+    command -v pkg-config &>/dev/null || missing+=(pkg-config)
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo ""
