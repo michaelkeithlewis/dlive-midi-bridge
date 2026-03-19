@@ -253,29 +253,33 @@ class AppleMIDISession:
         return rtp_header + midi_header + midi_data
 
     def send_midi(self, data: bytes):
-        """Broadcast MIDI bytes to every connected peer via RTP."""
+        """Broadcast MIDI bytes to every known peer that has any handshake progress."""
         if not self._data_transport:
             logger.warning("send_midi: no data transport bound")
             return
 
-        connected = [p for p in self._peers.values() if p.connected]
-        if not connected:
+        # Send to any peer that has at least started the handshake
+        # (ctrl_ok or data_ok). Being strict about requiring both
+        # breaks devices like iConnectivity MIO XM that have non-standard flows.
+        sendable = [p for p in self._peers.values() if p.ctrl_ok or p.data_ok]
+        if not sendable:
             logger.info(
-                f"send_midi: no connected RTP-MIDI peers — MIDI not forwarded "
+                f"send_midi: no RTP-MIDI peers ready — MIDI not forwarded "
                 f"(tracked: {len(self._peers)})"
             )
             return
 
         packet = self._build_rtp_midi_packet(data)
-        for peer in connected:
+        for peer in sendable:
             try:
                 self._data_transport.sendto(packet, peer.data_addr)
                 logger.info(
-                    f"RTP-MIDI tx → {peer.addr[0]}:{peer.addr[1]} "
-                    f"[{len(data)} bytes]: {data.hex(' ')}"
+                    f"RTP-MIDI tx → {peer.data_addr[0]}:{peer.data_addr[1]} "
+                    f"[{len(data)} bytes]: {data.hex(' ')} "
+                    f"(ctrl={'✓' if peer.ctrl_ok else '·'} data={'✓' if peer.data_ok else '·'})"
                 )
             except Exception as e:
-                logger.warning(f"RTP-MIDI send to {peer.addr} failed: {e}")
+                logger.warning(f"RTP-MIDI send to {peer.data_addr} failed: {e}")
 
     # ── Peer management ──────────────────────────────────────────────
 
@@ -366,9 +370,17 @@ class AppleMIDISession:
         if sig != APPLEMIDI_SIGNATURE:
             return
 
-        # For messages arriving on the data port, map address to control port
-        # so we don't create duplicate peer entries.
-        ctrl_addr = (addr[0], addr[1] - 1) if is_data_port else addr
+        # For messages arriving on the data port, find the corresponding
+        # control-port peer entry. Try port-1 first, then fall back to IP match.
+        if is_data_port:
+            ctrl_addr = (addr[0], addr[1] - 1)
+            if ctrl_addr not in self._peers:
+                for key in self._peers:
+                    if key[0] == addr[0]:
+                        ctrl_addr = key
+                        break
+        else:
+            ctrl_addr = addr
 
         if cmd == CMD_INVITATION:
             if len(data) < 16:
@@ -459,18 +471,25 @@ class AppleMIDISession:
                     self._handle_apple_midi(data, addr, self._data_transport, is_data_port=True)
                 return
 
-        # Actual RTP MIDI data — capture the peer's real data address and
-        # ensure the peer is marked fully connected (some implementations
-        # skip the data-port invitation and jump straight to sending data)
+        # Actual RTP MIDI data — find the peer and capture real data address.
+        # Try exact ctrl_port = data_port - 1 first, then fall back to IP match.
+        peer = None
         ctrl_key = (addr[0], addr[1] - 1)
         if ctrl_key in self._peers:
             peer = self._peers[ctrl_key]
+        else:
+            for key, p in self._peers.items():
+                if key[0] == addr[0]:
+                    peer = p
+                    break
+
+        if peer:
             peer.data_addr = addr
             if not peer.data_ok:
                 peer.data_ok = True
                 peer.connected = peer.ctrl_ok and peer.data_ok
                 logger.info(
-                    f"Peer {ctrl_key} data channel active "
+                    f"Peer {peer.addr} data channel active "
                     f"(data_addr={addr}, connected={peer.connected})"
                 )
 
