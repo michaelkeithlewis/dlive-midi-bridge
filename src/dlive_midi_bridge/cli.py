@@ -12,17 +12,20 @@ Usage:
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import platform
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
 import yaml
 
 from . import __version__
+from .bridge import STATUS_FILE
 from .dlive_tcp import DLIVE_MIXRACK_PORT
 
 
@@ -120,39 +123,103 @@ def _handle_restart():
 
 
 def _handle_status():
-    print(f"Version:   {__version__}")
+    print()
+    print("  dLive MIDI Bridge — Status")
+    print("  ──────────────────────────")
+    print()
+    print(f"  Version:   {__version__}")
     config_path = _find_config()
     if config_path:
         config = _load_config(config_path)
-        print(f"Config:    {config_path}")
+        print(f"  Config:    {config_path}")
         if config.get("bind_ip"):
-            print(f"Interface: {config['bind_ip']}")
-        print(f"dLive IP:  {config.get('dlive_ip', 'not set')}")
-        print(f"Session:   {config.get('session_name', 'dLive-MIDI-Bridge')}")
+            print(f"  Interface: {config['bind_ip']}")
+        print(f"  dLive IP:  {config.get('dlive_ip', 'not set')}")
+        print(f"  Session:   {config.get('session_name', 'dLive-MIDI-Bridge')}")
     else:
-        print("Config:    not found (run 'dlive setup')")
+        print("  Config:    not found (run 'dlive setup')")
 
     installed = _service_installed()
-    print(f"Service:   {'installed' if installed else 'not installed'}")
+    print(f"  Service:   {'installed' if installed else 'not installed'}")
 
+    running = False
     if _is_mac() and installed:
         result = subprocess.run(
             ["launchctl", "list", LAUNCHD_LABEL],
             capture_output=True, text=True,
         )
         running = result.returncode == 0
-        print(f"Running:   {'yes' if running else 'no'}")
-        if running:
-            print(f"Logs:      ~/Library/Logs/dlive-midi-bridge/dlive-midi-bridge.log")
+        print(f"  Running:   {'yes' if running else 'no'}")
     elif _is_linux() and installed:
         result = subprocess.run(
             ["systemctl", "is-active", SYSTEMD_UNIT],
             capture_output=True, text=True,
         )
         state = result.stdout.strip()
-        print(f"Running:   {state}")
-        if state == "active":
-            print("Logs:      journalctl -u dlive-midi-bridge -f")
+        running = state == "active"
+        print(f"  Running:   {state}")
+
+    # Live status from bridge process
+    if running:
+        _print_live_status()
+    print()
+
+
+def _print_live_status():
+    """Read the bridge's status file and display live connection info."""
+    if not STATUS_FILE.exists():
+        print()
+        print("  Waiting for bridge to report status...")
+        return
+
+    try:
+        data = json.loads(STATUS_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        print()
+        print("  Could not read live status.")
+        return
+
+    age = time.time() - data.get("updated", 0)
+    if age > 60:
+        print()
+        print(f"  Status data is {int(age)}s old — bridge may have stopped.")
+        return
+
+    dlive = data.get("dlive", {})
+    rtp = data.get("rtp_midi", {})
+    counters = data.get("counters", {})
+
+    print()
+    print("  ── Live ──")
+    dlive_ok = dlive.get("connected", False)
+    print(f"  dLive:     {'✓ connected' if dlive_ok else '✗ disconnected'}"
+          f"  ({dlive.get('host', '?')}:{dlive.get('port', '?')})")
+
+    peers = rtp.get("peers", [])
+    connected_count = sum(1 for p in peers if p.get("connected"))
+    total_count = len(peers)
+
+    print(f"  RTP peers: {connected_count} connected"
+          + (f"  ({total_count} discovered)" if total_count > connected_count else ""))
+
+    if peers:
+        for p in peers:
+            icon = "✓" if p.get("connected") else "·"
+            state = "connected" if p.get("connected") else "discovered"
+            print(f"             {icon} {p['host']}:{p['port']}  ({state})")
+    else:
+        print("             (none — waiting for Bonjour discovery)")
+
+    midi_in = counters.get("midi_to_dlive", 0)
+    midi_out = counters.get("dlive_to_network", 0)
+    print(f"  MIDI msgs: {midi_in} → dLive  |  {midi_out} ← dLive")
+
+    if _is_mac():
+        print()
+        print(f"  Logs: tail -f ~/Library/Logs/dlive-midi-bridge/dlive-midi-bridge.log")
+    elif _is_linux():
+        print()
+        print("  Logs: journalctl -u dlive-midi-bridge -f")
 
 
 # ── Uninstall ────────────────────────────────────────────────────────

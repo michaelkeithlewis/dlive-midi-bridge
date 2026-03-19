@@ -11,9 +11,12 @@ This is the core orchestrator that:
 """
 
 import asyncio
+import json
 import logging
 import signal
 import threading
+import time
+from pathlib import Path
 from typing import Optional
 
 from . import __version__
@@ -22,6 +25,8 @@ from .dlive_tcp import DLiveTCPConnection, DLIVE_MIXRACK_PORT, DLIVE_SURFACE_POR
 from .local_midi import LocalMIDIInput
 
 logger = logging.getLogger(__name__)
+
+STATUS_FILE = Path("/tmp/dlive-midi-bridge-status.json")
 
 
 class VirtualMIDIPort:
@@ -304,13 +309,17 @@ class MIDIBridge:
         dlive_status = "CONNECTED" if self._dlive and self._dlive.connected else "DISCONNECTED"
         stats = self._dlive.stats if self._dlive else {}
 
-        peer_details = ""
+        peers_list = []
         rtp_peers = 0
         if self._receiver and self._receiver._session:
             for addr, p in self._receiver._session._peers.items():
-                state = "CONNECTED" if p.connected else "idle"
-                peer_details += f"\n    Peer {addr[0]}:{addr[1]} = {state}"
-                if p.connected:
+                connected = bool(p.connected)
+                peers_list.append({
+                    "host": addr[0],
+                    "port": addr[1],
+                    "connected": connected,
+                })
+                if connected:
                     rtp_peers += 1
 
         logger.info(
@@ -319,8 +328,38 @@ class MIDIBridge:
             f"MIDI in→dLive={self._midi_count} | "
             f"dLive→network={self._midi_return_count} | "
             f"Active Sense rx={stats.get('active_sense_received', 0)}"
-            f"{peer_details}"
         )
+        for p in peers_list:
+            state = "CONNECTED" if p["connected"] else "idle"
+            logger.info(f"    Peer {p['host']}:{p['port']} = {state}")
+
+        self._write_status_file(dlive_status, rtp_peers, peers_list, stats)
+
+    def _write_status_file(self, dlive_status, rtp_peers, peers_list, stats):
+        status = {
+            "updated": time.time(),
+            "version": __version__,
+            "dlive": {
+                "host": self.dlive_host,
+                "port": self.dlive_port,
+                "connected": dlive_status == "CONNECTED",
+            },
+            "rtp_midi": {
+                "session_name": self.session_name,
+                "local_port": self.local_port,
+                "connected_peers": rtp_peers,
+                "peers": peers_list,
+            },
+            "counters": {
+                "midi_to_dlive": self._midi_count,
+                "dlive_to_network": self._midi_return_count,
+                "active_sense_rx": stats.get("active_sense_received", 0),
+            },
+        }
+        try:
+            STATUS_FILE.write_text(json.dumps(status, indent=2))
+        except Exception:
+            pass
 
     async def stop(self):
         """Stop the bridge gracefully."""
@@ -334,6 +373,7 @@ class MIDIBridge:
             await self._receiver.stop()
         if self._dlive:
             await self._dlive.disconnect()
+        STATUS_FILE.unlink(missing_ok=True)
         logger.info("Bridge stopped")
 
     async def run_forever(self):
