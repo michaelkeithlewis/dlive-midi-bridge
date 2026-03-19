@@ -331,6 +331,7 @@ HELP_TEXT = """
   dlive stop         Stop the background service
   dlive restart      Restart the background service
   dlive status       Show config + whether bridge is running
+  dlive peers        Live view of connected peers (refreshes every 2s)
 
   dlive help         Show this help
   dlive uninstall    Remove everything
@@ -344,6 +345,87 @@ HELP_TEXT = """
 
 def print_help():
     print(HELP_TEXT)
+
+
+# ── Live peers view ──────────────────────────────────────────────────
+
+def _handle_peers():
+    """Live-refreshing view of peer connections. Ctrl-C to exit."""
+    print()
+    print("  dLive MIDI Bridge — Live Peers  (Ctrl-C to exit)")
+    print("  ────────────────────────────────────────────────")
+    print()
+
+    try:
+        while True:
+            data = None
+            if STATUS_FILE.exists():
+                try:
+                    data = json.loads(STATUS_FILE.read_text())
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            # Build the display
+            lines = []
+            if data is None:
+                age = None
+            else:
+                age = time.time() - data.get("updated", 0)
+
+            if data is None or age > 30:
+                lines.append("  Bridge is not reporting. Is the service running?")
+                lines.append("  Try: dlive start")
+            else:
+                dlive = data.get("dlive", {})
+                rtp = data.get("rtp_midi", {})
+                counters = data.get("counters", {})
+
+                dlive_ok = dlive.get("connected", False)
+                lines.append(
+                    f"  dLive:   {'✓ CONNECTED' if dlive_ok else '✗ DISCONNECTED'}"
+                    f"  ({dlive.get('host', '?')}:{dlive.get('port', '?')})"
+                )
+
+                peers = rtp.get("peers", [])
+                connected = sum(1 for p in peers if p.get("connected"))
+                lines.append(f"  Peers:   {connected} connected / {len(peers)} discovered")
+                lines.append("")
+
+                if peers:
+                    lines.append("  ┌──────────────────────────────────────────────┐")
+                    for p in peers:
+                        icon = "✓" if p.get("connected") else "·"
+                        ctrl = "✓" if p.get("ctrl_ok") else "·"
+                        dat = "✓" if p.get("data_ok") else "·"
+                        send_to = p.get("data_addr", "?")
+                        lines.append(
+                            f"  │ {icon} {p['host']:<15s}:{p['port']:<5d} "
+                            f"ctrl={ctrl} data={dat}  tx→{send_to} │"
+                        )
+                    lines.append("  └──────────────────────────────────────────────┘")
+                else:
+                    lines.append("  (no peers — waiting for Bonjour discovery)")
+
+                lines.append("")
+                midi_in = counters.get("midi_to_dlive", 0)
+                midi_out = counters.get("dlive_to_network", 0)
+                lines.append(f"  MIDI:    {midi_in} → dLive  |  {midi_out} ← dLive → network")
+                lines.append(f"  Updated: {int(age)}s ago")
+
+            # Clear and redraw
+            sys.stdout.write("\033[2J\033[H")  # clear screen, cursor to top
+            print()
+            print("  dLive MIDI Bridge — Live Peers  (Ctrl-C to exit)")
+            print("  ────────────────────────────────────────────────")
+            print()
+            for line in lines:
+                print(line)
+            sys.stdout.flush()
+
+            time.sleep(2)
+
+    except KeyboardInterrupt:
+        print("\n")
 
 
 # ── Scan ─────────────────────────────────────────────────────────────
@@ -518,6 +600,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("stop", help="Stop the background service")
     subparsers.add_parser("restart", help="Restart the background service")
     subparsers.add_parser("status", help="Check if bridge is running")
+    subparsers.add_parser("peers", help="Live view of connected peers")
     subparsers.add_parser("uninstall", help="Remove everything")
 
     run_parser = subparsers.add_parser("run", help="Run the bridge (foreground)")
@@ -561,6 +644,8 @@ def main():
         _handle_restart()
     elif cmd == "status":
         _handle_status()
+    elif cmd == "peers":
+        _handle_peers()
     elif cmd == "uninstall":
         _handle_uninstall()
     elif cmd == "run":

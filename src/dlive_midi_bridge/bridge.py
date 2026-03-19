@@ -297,15 +297,14 @@ class MIDIBridge:
 
         logger.info("Bridge running. Waiting for MIDI...")
 
-        # Periodic status — first report after 5s so you can quickly check peers
+        # Write status immediately so `dlive status` works right away
+        self._log_status()
         asyncio.create_task(self._status_loop())
 
     async def _status_loop(self):
-        """Print periodic status info."""
-        await asyncio.sleep(5)
-        self._log_status()
+        """Write status file frequently so CLI always has fresh data."""
         while self._running:
-            await asyncio.sleep(25)
+            await asyncio.sleep(5)
             self._log_status()
 
     def _log_status(self):
