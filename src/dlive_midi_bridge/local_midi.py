@@ -13,13 +13,50 @@ Architecture:
 """
 
 import logging
+import os
+import subprocess
 import threading
 import time
 from typing import Callable, Optional
 
-import rtmidi
-
 logger = logging.getLogger(__name__)
+
+_alsa_init_attempted = False
+
+
+def _ensure_alsa_sequencer():
+    """On Linux, try to load the snd-seq kernel module if /dev/snd/seq is missing."""
+    global _alsa_init_attempted
+    if _alsa_init_attempted:
+        return
+    _alsa_init_attempted = True
+
+    import platform
+    if platform.system() != "Linux":
+        return
+
+    if os.path.exists("/dev/snd/seq"):
+        return
+
+    logger.info("ALSA sequencer not available — loading snd-seq module...")
+    try:
+        subprocess.run(
+            ["sudo", "modprobe", "snd-seq"],
+            capture_output=True, timeout=5,
+        )
+    except Exception as e:
+        logger.debug(f"Could not load snd-seq: {e}")
+
+
+def _get_rtmidi():
+    """Import rtmidi, ensuring ALSA is set up first. Returns None on failure."""
+    _ensure_alsa_sequencer()
+    try:
+        import rtmidi
+        return rtmidi
+    except Exception as e:
+        logger.warning(f"python-rtmidi unavailable: {e}")
+        return None
 
 HOTPLUG_POLL_INTERVAL = 3.0
 
@@ -72,10 +109,17 @@ class LocalMIDIInput:
 
     def _scan_and_open(self):
         """Scan for MIDI input ports and open any new ones."""
-        probe = rtmidi.MidiIn()
-        available = probe.get_ports()
-        probe.close_port()
-        del probe
+        rtmidi = _get_rtmidi()
+        if rtmidi is None:
+            return
+        try:
+            probe = rtmidi.MidiIn()
+            available = probe.get_ports()
+            probe.close_port()
+            del probe
+        except Exception as e:
+            logger.debug(f"MIDI port scan skipped (ALSA unavailable): {e}")
+            return
 
         for i, name in enumerate(available):
             if name in self._open_ports:
@@ -86,7 +130,7 @@ class LocalMIDIInput:
                 continue
 
             try:
-                midi_in = rtmidi.MidiIn()
+                midi_in = rtmidi.MidiIn()  # rtmidi already imported via _get_rtmidi above
                 midi_in.open_port(i)
                 midi_in.ignore_types(sysex=False, timing=True, active_sense=True)
                 midi_in.set_callback(self._make_callback(name))
@@ -119,10 +163,19 @@ class LocalMIDIInput:
         """Start listening on local MIDI ports."""
         self._running = True
 
-        probe = rtmidi.MidiIn()
-        available = probe.get_ports()
-        probe.close_port()
-        del probe
+        rtmidi = _get_rtmidi()
+        if rtmidi is None:
+            logger.warning("Local MIDI disabled — python-rtmidi/ALSA not available")
+            return
+
+        try:
+            probe = rtmidi.MidiIn()
+            available = probe.get_ports()
+            probe.close_port()
+            del probe
+        except Exception as e:
+            logger.warning(f"Local MIDI disabled — ALSA error: {e}")
+            return
 
         if available:
             logger.info(f"Found {len(available)} local MIDI port(s): {available}")
@@ -153,8 +206,14 @@ class LocalMIDIInput:
 
     def list_ports(self) -> list[str]:
         """Return a list of currently available MIDI input port names."""
-        probe = rtmidi.MidiIn()
-        ports = probe.get_ports()
-        probe.close_port()
-        del probe
-        return ports
+        rtmidi = _get_rtmidi()
+        if rtmidi is None:
+            return []
+        try:
+            probe = rtmidi.MidiIn()
+            ports = probe.get_ports()
+            probe.close_port()
+            del probe
+            return ports
+        except Exception:
+            return []

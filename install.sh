@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="0.5.5"
+VERSION="0.5.6"
 REPO_URL="https://github.com/michaelkeithlewis/dlive-midi-bridge.git"
 INSTALL_DIR="$HOME/.local/share/dlive-midi-bridge"
 BIN_DIR="$HOME/.local/bin"
@@ -104,6 +104,20 @@ if [[ "$PLATFORM" == "linux" ]]; then
         else
             sudo apt-get update -qq
             sudo apt-get install -y -qq "${missing[@]}"
+        fi
+    fi
+
+    # Ensure ALSA sequencer kernel module is loaded (needed for MIDI on headless Pi)
+    if [[ ! -e /dev/snd/seq ]]; then
+        echo "  Loading ALSA sequencer module..."
+        if [[ $EUID -eq 0 ]]; then
+            modprobe snd-seq 2>/dev/null || true
+        else
+            sudo modprobe snd-seq 2>/dev/null || true
+        fi
+        # Persist across reboots
+        if ! grep -q snd-seq /etc/modules 2>/dev/null; then
+            echo "snd-seq" | sudo tee -a /etc/modules >/dev/null 2>&1 || true
         fi
     fi
 fi

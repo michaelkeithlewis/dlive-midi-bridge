@@ -44,9 +44,12 @@ class VirtualMIDIPort:
         self._in = None
 
     def start(self):
+        from .local_midi import _get_rtmidi
+        rtmidi = _get_rtmidi()
+        if rtmidi is None:
+            logger.info("Virtual MIDI port skipped — ALSA/rtmidi not available")
+            return
         try:
-            import rtmidi
-
             self._out = rtmidi.MidiOut()
             self._out.open_virtual_port(self.name)
             logger.info(f"Virtual MIDI output port: '{self.name}'")

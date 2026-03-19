@@ -263,8 +263,11 @@ def scan_for_dlive(progress_callback=None, bind_ip: Optional[str] = None) -> lis
 
 
 def scan_midi_ports() -> list[str]:
+    from .local_midi import _get_rtmidi
+    rtmidi = _get_rtmidi()
+    if rtmidi is None:
+        return []
     try:
-        import rtmidi
         probe = rtmidi.MidiIn()
         ports = probe.get_ports()
         probe.close_port()
