@@ -255,14 +255,21 @@ class AppleMIDISession:
     # ── RTP-MIDI send ────────────────────────────────────────────────
 
     def _build_rtp_midi_packet(self, midi_data: bytes) -> bytes:
-        """Wrap raw MIDI bytes in an RTP packet."""
+        """Wrap raw MIDI bytes in an RTP packet.
+
+        Matches the CoreMIDI wire format so iConnectivity / MIO XM treats
+        packets identically to a macOS Network MIDI session:
+          - Marker bit set (0x80) on every packet (CoreMIDI convention)
+          - Minimal empty recovery journal (J=1) so the receiver considers
+            the stream reliable and routes MIDI through
+        """
         self._sequence = (self._sequence + 1) & 0xFFFF
         timestamp = self._now_ts() & 0xFFFFFFFF
 
         rtp_header = struct.pack(
             ">BBHII",
-            (RTP_VERSION << 6) | 0,
-            RTP_MIDI_PAYLOAD_TYPE,
+            (RTP_VERSION << 6),
+            0x80 | RTP_MIDI_PAYLOAD_TYPE,
             self._sequence,
             timestamp,
             self.ssrc,
@@ -270,14 +277,20 @@ class AppleMIDISession:
 
         midi_len = len(midi_data)
         if midi_len > 15:
-            midi_header = bytes([
-                0x80 | ((midi_len >> 8) & 0x0F),
+            midi_cmd_header = bytes([
+                0x80 | 0x40 | ((midi_len >> 8) & 0x0F),
                 midi_len & 0xFF,
             ])
         else:
-            midi_header = bytes([midi_len & 0x0F])
+            midi_cmd_header = bytes([0x40 | (midi_len & 0x0F)])
 
-        return rtp_header + midi_header + midi_data
+        # Minimal recovery journal: 3-byte header, no channel/system journals.
+        # S=0 (not single-pkt), Y=0 (no system journal), A=0 (no channel journals),
+        # H=0, TOTCHAN=0, checkpoint = last sequence we sent.
+        checkpoint = (self._sequence - 1) & 0xFFFF
+        journal = struct.pack(">BH", 0x00, checkpoint)
+
+        return rtp_header + midi_cmd_header + midi_data + journal
 
     def send_midi(self, data: bytes):
         """Broadcast MIDI bytes to every known peer."""
