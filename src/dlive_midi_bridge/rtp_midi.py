@@ -20,6 +20,9 @@ The AppleMIDI session protocol uses two UDP ports:
 import asyncio
 import logging
 import struct
+import subprocess
+import shutil
+import sys
 import time
 import random
 import socket as _socket
@@ -343,23 +346,39 @@ class AppleMIDISession:
         token = random.randint(0, 0xFFFFFFFF)
         inv = self._build_invitation(token)
 
-        # Phase 1: control port invitation
-        logger.info(f"Sending control invitation to {host}:{port}")
-        if self._control_transport:
-            self._control_transport.sendto(inv, (host, port))
-
-        # Wait for control ACK (up to 2s) before sending data invitation
-        for _ in range(20):
-            await asyncio.sleep(0.1)
-            if peer.connected:
+        # Phase 1: control port invitation (retry up to 3 times)
+        for attempt in range(3):
+            if peer.ctrl_ok:
                 break
+            logger.info(f"Sending control invitation to {host}:{port} (attempt {attempt + 1})")
+            if self._control_transport:
+                self._control_transport.sendto(inv, (host, port))
+            for _ in range(20):
+                await asyncio.sleep(0.1)
+                if peer.ctrl_ok:
+                    break
 
-        # Phase 2: data port invitation (required by many implementations)
-        data_token = random.randint(0, 0xFFFFFFFF)
-        data_inv = self._build_invitation(data_token)
-        logger.info(f"Sending data invitation to {host}:{port + 1}")
-        if self._data_transport:
-            self._data_transport.sendto(data_inv, (host, port + 1))
+        # Phase 2: data port invitation (retry up to 3 times)
+        for attempt in range(3):
+            if peer.data_ok:
+                break
+            data_token = random.randint(0, 0xFFFFFFFF)
+            data_inv = self._build_invitation(data_token)
+            logger.info(f"Sending data invitation to {host}:{port + 1} (attempt {attempt + 1})")
+            if self._data_transport:
+                self._data_transport.sendto(data_inv, (host, port + 1))
+            for _ in range(20):
+                await asyncio.sleep(0.1)
+                if peer.data_ok:
+                    break
+
+        if peer.data_ok:
+            logger.info(f"Full handshake complete with {host}:{port} (ctrl=✓ data=✓)")
+        elif peer.ctrl_ok:
+            logger.warning(
+                f"Partial handshake with {host}:{port} (ctrl=✓ data=·) — "
+                f"peer may not accept our MIDI data"
+            )
 
     async def _send_data_invitation(self, peer: _PeerInfo):
         """Send a data-port invitation to a peer (used after accepting an incoming control invitation)."""
@@ -690,6 +709,9 @@ class BonjourMIDIAdvertiser:
     Advertises an RTP-MIDI session via Bonjour so other devices can
     discover and connect to us (e.g., Audio MIDI Setup on macOS,
     rtpMIDI on Windows).
+
+    On Linux, uses avahi-publish (via avahi-daemon) for reliable mDNS
+    advertisement. Falls back to Python Zeroconf on other platforms.
     """
 
     SERVICE_TYPE = "_apple-midi._udp.local."
@@ -700,6 +722,36 @@ class BonjourMIDIAdvertiser:
         self.bind_ip = bind_ip
         self._zeroconf: Optional[Zeroconf] = None
         self._info: Optional[ServiceInfo] = None
+        self._avahi_proc: Optional[subprocess.Popen] = None
+
+    def _try_avahi_publish(self) -> bool:
+        """Use avahi-publish for reliable Linux mDNS advertisement."""
+        if sys.platform != "linux":
+            return False
+        avahi = shutil.which("avahi-publish")
+        if not avahi:
+            logger.debug("avahi-publish not found, will use Python Zeroconf")
+            return False
+        try:
+            cmd = [avahi, "-s", self.name, "_apple-midi._udp", str(self.port)]
+            self._avahi_proc = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            )
+            time.sleep(0.5)
+            if self._avahi_proc.poll() is not None:
+                err = self._avahi_proc.stderr.read().decode(errors="replace").strip()
+                logger.warning(f"avahi-publish exited immediately: {err}")
+                self._avahi_proc = None
+                return False
+            logger.info(
+                f"Bonjour advertisement active via avahi-publish: "
+                f"'{self.name}' on port {self.port}"
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"avahi-publish failed: {e}")
+            self._avahi_proc = None
+            return False
 
     def start(self, **zeroconf_kwargs):
         ip_addr = self.bind_ip or _get_local_ip()
@@ -708,10 +760,14 @@ class BonjourMIDIAdvertiser:
             return
 
         logger.info(f"Bonjour: advertising '{self.name}' on {ip_addr}:{self.port}")
+
+        # Prefer avahi-publish on Linux — much more reliable for LAN discovery
+        if self._try_avahi_publish():
+            return
+
+        # Fall back to Python Zeroconf (macOS, Windows, or avahi missing)
         if zeroconf_kwargs:
             logger.info(f"Bonjour: zeroconf kwargs: {zeroconf_kwargs}")
-
-        # Try with interface-scoped Zeroconf first, fall back to default
         for attempt, kw in enumerate([zeroconf_kwargs, {}]):
             try:
                 self._info = ServiceInfo(
@@ -724,14 +780,14 @@ class BonjourMIDIAdvertiser:
                 self._zeroconf = Zeroconf(**kw)
                 self._zeroconf.register_service(self._info)
                 logger.info(
-                    f"Bonjour advertisement active: '{self.name}' "
+                    f"Bonjour advertisement active via Zeroconf: '{self.name}' "
                     f"on {ip_addr}:{self.port}"
                     + (f" (attempt {attempt + 1})" if attempt > 0 else "")
                 )
                 return
             except Exception as e:
                 logger.warning(
-                    f"Bonjour advertisement attempt {attempt + 1} failed: {e}"
+                    f"Bonjour Zeroconf attempt {attempt + 1} failed: {e}"
                 )
                 if self._zeroconf:
                     try:
@@ -747,6 +803,13 @@ class BonjourMIDIAdvertiser:
         )
 
     def stop(self):
+        if self._avahi_proc:
+            self._avahi_proc.terminate()
+            try:
+                self._avahi_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self._avahi_proc.kill()
+            self._avahi_proc = None
         if self._zeroconf and self._info:
             self._zeroconf.unregister_service(self._info)
         if self._zeroconf:
