@@ -120,6 +120,7 @@ class DLiveTCPConnection:
         """Read incoming data from the dLive and parse MIDI messages."""
         midi_buf = bytearray()
         expected_len = 0
+        running_status = 0
         try:
             while self._connected and self._reader:
                 data = await self._reader.read(1024)
@@ -145,11 +146,31 @@ class DLiveTCPConnection:
                         if midi_buf:
                             logger.debug(f"dLive rx: discarding partial [{midi_buf.hex(' ')}]")
                         midi_buf = bytearray([byte_val])
-                        expected_len = self._midi_msg_length(byte_val)
+                        expected_len = 0
+
+                        # Channel voice status bytes support running status
+                        if 0x80 <= byte_val <= 0xEF:
+                            running_status = byte_val
+                            expected_len = self._midi_msg_length(byte_val)
                         # SysEx (0xF0) accumulates until 0xF7
-                        if byte_val == 0xF0:
+                        elif byte_val == 0xF0:
+                            running_status = 0
                             expected_len = -1  # variable length
-                        elif expected_len == 0:
+                        # System common message lengths
+                        elif byte_val in (0xF1, 0xF3):
+                            running_status = 0
+                            expected_len = 1
+                        elif byte_val == 0xF2:
+                            running_status = 0
+                            expected_len = 2
+                        elif byte_val in (0xF6,):
+                            running_status = 0
+                            expected_len = 0
+                        elif byte_val == 0xF7:
+                            running_status = 0
+                            expected_len = 0
+
+                        if expected_len == 0 and byte_val != 0xF0:
                             # Single-byte message
                             if self.midi_callback:
                                 self.midi_callback(bytes(midi_buf))
@@ -158,7 +179,18 @@ class DLiveTCPConnection:
 
                     # Data byte
                     if not midi_buf:
-                        continue  # stray data byte with no status
+                        # Running status: data bytes can arrive without a status byte
+                        if running_status:
+                            midi_buf = bytearray([running_status, byte_val])
+                            expected_len = self._midi_msg_length(running_status)
+                            if len(midi_buf) - 1 >= expected_len:
+                                if self.midi_callback:
+                                    self.midi_callback(bytes(midi_buf))
+                                logger.debug(f"dLive rx MIDI (running): [{bytes(midi_buf).hex(' ')}]")
+                                midi_buf = bytearray()
+                            continue
+                        else:
+                            continue  # stray data byte with no status
 
                     midi_buf.append(byte_val)
 

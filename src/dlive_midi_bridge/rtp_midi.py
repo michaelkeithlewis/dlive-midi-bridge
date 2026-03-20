@@ -262,7 +262,7 @@ class AppleMIDISession:
         rtp_header = struct.pack(
             ">BBHII",
             (RTP_VERSION << 6) | 0,
-            0x80 | RTP_MIDI_PAYLOAD_TYPE,
+            RTP_MIDI_PAYLOAD_TYPE,
             self._sequence,
             timestamp,
             self.ssrc,
