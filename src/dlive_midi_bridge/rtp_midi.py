@@ -257,11 +257,10 @@ class AppleMIDISession:
     def _build_rtp_midi_packet(self, midi_data: bytes) -> bytes:
         """Wrap raw MIDI bytes in an RTP packet.
 
-        Matches the CoreMIDI wire format so iConnectivity / MIO XM treats
-        packets identically to a macOS Network MIDI session:
-          - Marker bit set (0x80) on every packet (CoreMIDI convention)
-          - Minimal empty recovery journal (J=1) so the receiver considers
-            the stream reliable and routes MIDI through
+        Uses the simplest valid RTP-MIDI format:
+          - Marker bit set (0x80) — CoreMIDI convention
+          - J=0, Z=0, P=0 — no journal, no delta-times, no phantom
+          - Short or long MIDI command header depending on payload size
         """
         self._sequence = (self._sequence + 1) & 0xFFFF
         timestamp = self._now_ts() & 0xFFFFFFFF
@@ -278,19 +277,13 @@ class AppleMIDISession:
         midi_len = len(midi_data)
         if midi_len > 15:
             midi_cmd_header = bytes([
-                0x80 | 0x40 | ((midi_len >> 8) & 0x0F),
+                0x80 | ((midi_len >> 8) & 0x0F),
                 midi_len & 0xFF,
             ])
         else:
-            midi_cmd_header = bytes([0x40 | (midi_len & 0x0F)])
+            midi_cmd_header = bytes([midi_len & 0x0F])
 
-        # Minimal recovery journal: 3-byte header, no channel/system journals.
-        # S=0 (not single-pkt), Y=0 (no system journal), A=0 (no channel journals),
-        # H=0, TOTCHAN=0, checkpoint = last sequence we sent.
-        checkpoint = (self._sequence - 1) & 0xFFFF
-        journal = struct.pack(">BH", 0x00, checkpoint)
-
-        return rtp_header + midi_cmd_header + midi_data + journal
+        return rtp_header + midi_cmd_header + midi_data
 
     def send_midi(self, data: bytes):
         """Broadcast MIDI bytes to every known peer."""
@@ -527,11 +520,11 @@ class AppleMIDISession:
                 if count == 0:
                     reply = self._build_sync(1, [ts1, now, 0])
                     reply_transport.sendto(reply, addr)
-                    logger.debug(f"Sync CK0→CK1 with {addr}")
+                    logger.info(f"Sync CK0→CK1 reply to {addr}")
                 elif count == 1:
                     reply = self._build_sync(2, [ts1, ts2, now])
                     reply_transport.sendto(reply, addr)
-                    logger.debug(f"Sync CK1→CK2 with {addr}")
+                    logger.info(f"Sync CK1→CK2 reply to {addr}")
 
         elif cmd == CMD_BYE:
             ctrl_key = (addr[0], addr[1] - 1) if is_data_port else (addr[0], addr[1])
@@ -617,6 +610,7 @@ class AppleMIDISession:
 
     async def _sync_loop(self):
         """Periodically send sync (CK) packets to all connected peers."""
+        sync_count = 0
         while True:
             await asyncio.sleep(10)
             if not self._control_transport:
@@ -627,6 +621,12 @@ class AppleMIDISession:
                 if peer.connected:
                     try:
                         self._control_transport.sendto(sync, peer.addr)
+                        sync_count += 1
+                        if sync_count <= 5:
+                            logger.info(
+                                f"Sync CK0 #{sync_count} sent to {peer.addr} "
+                                f"({len(sync)} bytes)"
+                            )
                     except Exception as e:
                         logger.warning(f"Sync to {peer.addr} failed: {e}")
 
