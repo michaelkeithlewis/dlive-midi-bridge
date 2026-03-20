@@ -11,6 +11,7 @@ Usage:
 import ipaddress
 import os
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -720,6 +721,10 @@ def _install_systemd(config_path: Path):
         warn("Try: sudo dlive setup")
         return
 
+    # Ensure avahi is configured on the selected network interface.
+    # This avoids the common failure mode where avahi ignores eth0.
+    _configure_avahi_for_config(config_path, sudo)
+
     ok(f"Service file installed at {service_dest}")
 
     subprocess.run(sudo + ["systemctl", "daemon-reload"], check=False)
@@ -737,6 +742,78 @@ def _install_systemd(config_path: Path):
     else:
         ok("Service enabled but not started.")
         print("  Start later: dlive start")
+
+
+def _configure_avahi_for_config(config_path: Path, sudo: list[str]):
+    """Configure avahi-daemon to publish on the selected interface."""
+    if platform.system() != "Linux":
+        return
+
+    bind_ip = None
+    try:
+        cfg = yaml.safe_load(config_path.read_text()) or {}
+        bind_ip = cfg.get("bind_ip")
+    except Exception:
+        cfg = {}
+
+    # If no bind_ip is set, still ensure avahi is enabled/running.
+    if not bind_ip:
+        subprocess.run(sudo + ["systemctl", "enable", "avahi-daemon"], check=False)
+        subprocess.run(sudo + ["systemctl", "restart", "avahi-daemon"], check=False)
+        return
+
+    iface = None
+    for i in get_network_interfaces():
+        if i.get("ip") == bind_ip:
+            iface = i.get("device")
+            break
+
+    if not iface:
+        warn(f"Could not map bind_ip {bind_ip} to a network interface for avahi.")
+        subprocess.run(sudo + ["systemctl", "restart", "avahi-daemon"], check=False)
+        return
+
+    conf_path = Path("/etc/avahi/avahi-daemon.conf")
+    read_cmd = (["cat", str(conf_path)] if os.geteuid() == 0
+                else ["sudo", "cat", str(conf_path)])
+    current = subprocess.run(read_cmd, capture_output=True, text=True)
+    if current.returncode != 0:
+        warn("Could not read /etc/avahi/avahi-daemon.conf")
+        subprocess.run(sudo + ["systemctl", "restart", "avahi-daemon"], check=False)
+        return
+
+    text = current.stdout
+    if "[server]" not in text:
+        text = text.rstrip() + "\n\n[server]\n"
+
+    # Replace allow-interfaces in [server] section if present, otherwise add it.
+    server_match = re.search(r"(?ms)^\[server\]\n(.*?)(?=^\[|\Z)", text)
+    if server_match:
+        block = server_match.group(1)
+        if re.search(r"(?m)^\s*#?\s*allow-interfaces\s*=", block):
+            block = re.sub(
+                r"(?m)^\s*#?\s*allow-interfaces\s*=.*$",
+                f"allow-interfaces={iface}",
+                block,
+            )
+        else:
+            block = block.rstrip() + f"\nallow-interfaces={iface}\n"
+        text = text[:server_match.start(1)] + block + text[server_match.end(1):]
+
+    tmp = Path("/tmp/dlive-avahi-daemon.conf")
+    tmp.write_text(text)
+    cp_result = subprocess.run(
+        sudo + ["cp", str(tmp), str(conf_path)],
+        capture_output=True, text=True,
+    )
+    tmp.unlink(missing_ok=True)
+    if cp_result.returncode != 0:
+        warn("Could not update avahi-daemon.conf automatically.")
+    else:
+        ok(f"Configured avahi-daemon to publish on {iface} ({bind_ip})")
+
+    subprocess.run(sudo + ["systemctl", "enable", "avahi-daemon"], check=False)
+    subprocess.run(sudo + ["systemctl", "restart", "avahi-daemon"], check=False)
 
 
 def step_install_service(config_path: Path):
@@ -807,6 +884,11 @@ def run_wizard():
         "local_midi_filter": local_midi_filter,
         "midi_channel": midi_channel,
         "log_midi": log_midi,
+        # Snapshot compatibility shim (dLive PC -> Note for show triggers)
+        "snapshot_note_shim": True,
+        "snapshot_pc_channel": 8,
+        "snapshot_pc_program": 7,
+        "snapshot_note_hex": "98 3C 7F",
     }
 
     config_path = step_write_config(config)

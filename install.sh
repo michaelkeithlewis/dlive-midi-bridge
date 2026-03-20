@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-VERSION="0.7.2"
+VERSION="0.7.4"
 REPO_URL="https://github.com/michaelkeithlewis/dlive-midi-bridge.git"
 INSTALL_DIR="$HOME/.local/share/dlive-midi-bridge"
 BIN_DIR="$HOME/.local/bin"
@@ -114,11 +114,13 @@ if [[ "$PLATFORM" == "linux" ]]; then
     # Ensure avahi-daemon is running (required for Bonjour/mDNS discovery)
     echo "  Ensuring avahi-daemon is running..."
     if [[ $EUID -eq 0 ]]; then
+        systemctl unmask avahi-daemon 2>/dev/null || true
         systemctl enable avahi-daemon 2>/dev/null || true
-        systemctl start avahi-daemon 2>/dev/null || true
+        systemctl restart avahi-daemon 2>/dev/null || true
     else
+        sudo systemctl unmask avahi-daemon 2>/dev/null || true
         sudo systemctl enable avahi-daemon 2>/dev/null || true
-        sudo systemctl start avahi-daemon 2>/dev/null || true
+        sudo systemctl restart avahi-daemon 2>/dev/null || true
     fi
     if systemctl is-active avahi-daemon &>/dev/null 2>&1; then
         echo "  ✓ avahi-daemon is running"

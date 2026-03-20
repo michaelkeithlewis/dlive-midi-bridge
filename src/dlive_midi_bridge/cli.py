@@ -159,6 +159,15 @@ def _handle_status():
         running = state == "active"
         print(f"  Running:   {state}")
 
+        avahi = subprocess.run(
+            ["systemctl", "is-active", "avahi-daemon"],
+            capture_output=True, text=True,
+        )
+        avahi_state = avahi.stdout.strip() or "unknown"
+        print(f"  Avahi:     {avahi_state}")
+        if avahi_state != "active":
+            print("             (run: sudo systemctl restart avahi-daemon)")
+
     # Live status from bridge process
     if running:
         _print_live_status()
@@ -549,6 +558,10 @@ def _handle_run(args):
     enable_local_midi = getattr(args, "local_midi", False) or config.get("local_midi", False)
     local_midi_filter = getattr(args, "local_midi_filter", None) or config.get("local_midi_filter")
     bind_ip = config.get("bind_ip")
+    snapshot_note_shim = config.get("snapshot_note_shim", True)
+    snapshot_pc_channel = config.get("snapshot_pc_channel", 8)
+    snapshot_pc_program = config.get("snapshot_pc_program", 7)
+    snapshot_note_hex = config.get("snapshot_note_hex", "98 3C 7F")
 
     _setup_logging(verbose=verbose, quiet=quiet)
 
@@ -563,6 +576,10 @@ def _handle_run(args):
         enable_local_midi=enable_local_midi,
         local_midi_filter=local_midi_filter,
         bind_ip=bind_ip,
+        snapshot_note_shim=snapshot_note_shim,
+        snapshot_pc_channel=snapshot_pc_channel,
+        snapshot_pc_program=snapshot_pc_program,
+        snapshot_note_hex=snapshot_note_hex,
     )
 
     try:

@@ -116,6 +116,10 @@ class MIDIBridge:
         enable_local_midi: bool = False,
         local_midi_filter: Optional[str] = None,
         bind_ip: Optional[str] = None,
+        snapshot_note_shim: bool = True,
+        snapshot_pc_channel: int = 8,
+        snapshot_pc_program: int = 7,
+        snapshot_note_hex: str = "98 3C 7F",
     ):
         self.dlive_host = dlive_host
         self.dlive_port = dlive_port
@@ -127,6 +131,13 @@ class MIDIBridge:
         self.enable_local_midi = enable_local_midi
         self.local_midi_filter = local_midi_filter
         self.bind_ip = bind_ip
+        self.snapshot_note_shim = snapshot_note_shim
+        self.snapshot_pc_channel = snapshot_pc_channel
+        self.snapshot_pc_program = snapshot_pc_program
+        try:
+            self.snapshot_note_bytes = bytes.fromhex(snapshot_note_hex)
+        except ValueError:
+            self.snapshot_note_bytes = b"\x98\x3c\x7f"
 
         self._dlive: Optional[DLiveTCPConnection] = None
         self._receiver: Optional[RTPMIDIReceiver] = None
@@ -230,6 +241,27 @@ class MIDIBridge:
             self._receiver.send_midi(data)
         else:
             logger.warning("No RTP-MIDI receiver — cannot forward to network")
+
+        # Compatibility shim:
+        # Some dLive snapshot workflows emit Bank+Program, while show software
+        # expects a Note On trigger. Emit the configured note when the expected
+        # Program Change is seen.
+        if (
+            self.snapshot_note_shim
+            and len(data) >= 2
+            and (data[0] & 0xF0) == 0xC0
+            and ((data[0] & 0x0F) + 1) == self.snapshot_pc_channel
+            and data[1] == self.snapshot_pc_program
+        ):
+            logger.info(
+                "Snapshot shim: matched Program Change "
+                f"ch={self.snapshot_pc_channel} prog={self.snapshot_pc_program}; "
+                f"emitting Note [{self.snapshot_note_bytes.hex(' ')}]"
+            )
+            if self._receiver:
+                self._receiver.send_midi(self.snapshot_note_bytes)
+            if self._virtual_port:
+                self._virtual_port.send(self.snapshot_note_bytes)
 
         if self._virtual_port:
             self._virtual_port.send(data)
