@@ -120,6 +120,7 @@ class MIDIBridge:
         snapshot_pc_channel: int = 8,
         snapshot_pc_program: int = 7,
         snapshot_note_hex: str = "98 3C 7F",
+        passive_mode: bool = True,
     ):
         self.dlive_host = dlive_host
         self.dlive_port = dlive_port
@@ -134,6 +135,7 @@ class MIDIBridge:
         self.snapshot_note_shim = snapshot_note_shim
         self.snapshot_pc_channel = snapshot_pc_channel
         self.snapshot_pc_program = snapshot_pc_program
+        self.passive_mode = passive_mode
         try:
             self.snapshot_note_bytes = bytes.fromhex(snapshot_note_hex)
         except ValueError:
@@ -308,6 +310,7 @@ class MIDIBridge:
             local_port=self.local_port,
             filter_name=self.filter_name,
             bind_ip=self.bind_ip,
+            passive_mode=self.passive_mode,
         )
         await self._receiver.start()
 

@@ -562,6 +562,7 @@ def _handle_run(args):
     snapshot_pc_channel = config.get("snapshot_pc_channel", 8)
     snapshot_pc_program = config.get("snapshot_pc_program", 7)
     snapshot_note_hex = config.get("snapshot_note_hex", "98 3C 7F")
+    passive_mode = config.get("passive_mode", True)
 
     _setup_logging(verbose=verbose, quiet=quiet)
 
@@ -580,6 +581,7 @@ def _handle_run(args):
         snapshot_pc_channel=snapshot_pc_channel,
         snapshot_pc_program=snapshot_pc_program,
         snapshot_note_hex=snapshot_note_hex,
+        passive_mode=passive_mode,
     )
 
     try:

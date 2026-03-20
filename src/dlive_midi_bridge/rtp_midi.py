@@ -939,12 +939,14 @@ class RTPMIDIReceiver:
         local_port: int = 5004,
         filter_name: Optional[str] = None,
         bind_ip: Optional[str] = None,
+        passive_mode: bool = False,
     ):
         self.midi_callback = midi_callback
         self.session_name = session_name
         self.local_port = local_port
         self.filter_name = filter_name
         self.bind_ip = bind_ip
+        self.passive_mode = passive_mode
 
         self._session: Optional[AppleMIDISession] = None
         self._browser: Optional[BonjourMIDIBrowser] = None
@@ -985,6 +987,12 @@ class RTPMIDIReceiver:
             return
         self._known_peers.add(key)
 
+        if self.passive_mode:
+            logger.info(
+                f"Discovered peer '{name}' at {host}:{port} (passive mode: not inviting)"
+            )
+            return
+
         logger.info(f"Connecting to discovered peer '{name}' at {host}:{port}")
         if self._session and self._loop:
             asyncio.run_coroutine_threadsafe(
@@ -1016,12 +1024,15 @@ class RTPMIDIReceiver:
         )
         self._advertiser.start(**zc_kwargs)
 
-        # 3. Browse for existing sessions and send them invitations
-        self._browser = BonjourMIDIBrowser(
-            on_discovered=self._on_peer_discovered,
-            filter_name=self.filter_name,
-        )
-        self._browser.start(**zc_kwargs)
+        # 3. Browse for existing sessions and send invitations (unless passive mode)
+        if self.passive_mode:
+            logger.info("Passive mode enabled: waiting for peers to initiate connection")
+        else:
+            self._browser = BonjourMIDIBrowser(
+                on_discovered=self._on_peer_discovered,
+                filter_name=self.filter_name,
+            )
+            self._browser.start(**zc_kwargs)
 
     def send_midi(self, data: bytes):
         """Broadcast MIDI bytes to all connected RTP-MIDI peers."""

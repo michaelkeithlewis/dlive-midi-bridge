@@ -889,6 +889,9 @@ def run_wizard():
         "snapshot_pc_channel": 8,
         "snapshot_pc_program": 7,
         "snapshot_note_hex": "98 3C 7F",
+        # Passive mode matches macOS Network MIDI behavior:
+        # advertise + accept incoming, no auto-invites to discovered peers.
+        "passive_mode": True,
     }
 
     config_path = step_write_config(config)
