@@ -221,10 +221,10 @@ class MIDIBridge:
             return
 
         self._midi_return_count += 1
-        logger.info(f"dLive → network: [{data.hex(' ')}]")
 
-        if self.log_midi:
-            self._log_midi_message(data)
+        # Always decode dLive→network messages for visibility
+        self._log_midi_message(data)
+        logger.info(f"dLive → network [{data.hex(' ')}]")
 
         if self._receiver:
             self._receiver.send_midi(data)
@@ -324,6 +324,7 @@ class MIDIBridge:
                     "data_ok": bool(p.data_ok),
                     "data_addr": f"{p.data_addr[0]}:{p.data_addr[1]}",
                     "rx_count": p.rx_count,
+                    "tx_count": p.tx_count,
                 })
                 if p.can_send:
                     rtp_peers += 1

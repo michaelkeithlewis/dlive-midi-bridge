@@ -48,7 +48,7 @@ RTP_MIDI_PAYLOAD_TYPE = 97
 class _PeerInfo:
     """State for a single connected RTP-MIDI peer."""
 
-    __slots__ = ("addr", "ssrc", "data_addr", "ctrl_ok", "data_ok", "rx_count")
+    __slots__ = ("addr", "ssrc", "data_addr", "ctrl_ok", "data_ok", "rx_count", "tx_count")
 
     def __init__(self, addr: tuple[str, int], ssrc: int = 0):
         self.addr = addr                                    # (host, control_port)
@@ -57,6 +57,7 @@ class _PeerInfo:
         self.ctrl_ok = False
         self.data_ok = False
         self.rx_count = 0                                   # MIDI messages received from this peer
+        self.tx_count = 0                                   # MIDI messages sent to this peer
 
     @property
     def can_send(self) -> bool:
@@ -302,12 +303,13 @@ class AppleMIDISession:
             try:
                 self._data_transport.sendto(packet, peer.data_addr)
                 self._tx_count += 1
-                if self._tx_count <= 3:
+                peer.tx_count += 1
+                if self._tx_count <= 5:
                     logger.info(
                         f"*** RTP-MIDI tx #{self._tx_count} → "
                         f"{peer.data_addr[0]}:{peer.data_addr[1]} "
                         f"[{len(data)} bytes]: {data.hex(' ')} "
-                        f"(pkt {len(packet)} bytes) ***"
+                        f"(pkt {len(packet)} bytes, seq={self._sequence}) ***"
                     )
                 else:
                     logger.info(
@@ -723,17 +725,34 @@ class BonjourMIDIAdvertiser:
         self._zeroconf: Optional[Zeroconf] = None
         self._info: Optional[ServiceInfo] = None
         self._avahi_proc: Optional[subprocess.Popen] = None
+        self._addr_proc: Optional[subprocess.Popen] = None
 
     def _try_avahi_publish(self) -> bool:
         """Use avahi-publish for reliable Linux mDNS advertisement."""
         if sys.platform != "linux":
             return False
-        avahi = shutil.which("avahi-publish")
+        avahi = shutil.which("avahi-publish-service") or shutil.which("avahi-publish")
         if not avahi:
             logger.debug("avahi-publish not found, will use Python Zeroconf")
             return False
+
+        is_wrapper = avahi.endswith("avahi-publish")
+        ip_addr = self.bind_ip or _get_local_ip()
+
+        # Build the command: avahi-publish-service or avahi-publish -s
+        if is_wrapper:
+            cmd = [avahi, "-s"]
+        else:
+            cmd = [avahi]
+
+        # Force hostname to resolve to our bind IP so peers reach the right address
+        if ip_addr:
+            cmd += ["--host", f"{self.name}.local"]
+        cmd += [self.name, "_apple-midi._udp", str(self.port)]
+
+        logger.info(f"Bonjour: starting avahi: {' '.join(cmd)}")
+
         try:
-            cmd = [avahi, "-s", self.name, "_apple-midi._udp", str(self.port)]
             self._avahi_proc = subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             )
@@ -742,16 +761,52 @@ class BonjourMIDIAdvertiser:
                 err = self._avahi_proc.stderr.read().decode(errors="replace").strip()
                 logger.warning(f"avahi-publish exited immediately: {err}")
                 self._avahi_proc = None
-                return False
-            logger.info(
-                f"Bonjour advertisement active via avahi-publish: "
-                f"'{self.name}' on port {self.port}"
-            )
-            return True
+                # Retry without --host flag
+                if "--host" in cmd:
+                    cmd = [c for c in cmd if c != "--host" and c != f"{self.name}.local"]
+                    logger.info(f"Bonjour: retrying without --host: {' '.join(cmd)}")
+                    self._avahi_proc = subprocess.Popen(
+                        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    )
+                    time.sleep(0.5)
+                    if self._avahi_proc.poll() is not None:
+                        err = self._avahi_proc.stderr.read().decode(errors="replace").strip()
+                        logger.warning(f"avahi-publish retry also failed: {err}")
+                        self._avahi_proc = None
+                        return False
+
+            if self._avahi_proc and self._avahi_proc.poll() is None:
+                logger.info(
+                    f"Bonjour advertisement active via avahi: "
+                    f"'{self.name}' on {ip_addr or '?'}:{self.port} (pid {self._avahi_proc.pid})"
+                )
+                # Also publish an address record so the hostname resolves to our IP
+                if ip_addr:
+                    self._publish_address(ip_addr)
+                return True
+            return False
         except Exception as e:
             logger.warning(f"avahi-publish failed: {e}")
             self._avahi_proc = None
             return False
+
+    def _publish_address(self, ip_addr: str):
+        """Publish an address record so our session hostname resolves correctly."""
+        avahi = shutil.which("avahi-publish-address") or shutil.which("avahi-publish")
+        if not avahi:
+            return
+        try:
+            is_wrapper = avahi.endswith("avahi-publish")
+            if is_wrapper:
+                cmd = [avahi, "-a", f"{self.name}.local", ip_addr]
+            else:
+                cmd = [avahi, f"{self.name}.local", ip_addr]
+            self._addr_proc = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            logger.debug(f"Published address record: {self.name}.local → {ip_addr}")
+        except Exception as e:
+            logger.debug(f"Address record publish failed (non-critical): {e}")
 
     def start(self, **zeroconf_kwargs):
         ip_addr = self.bind_ip or _get_local_ip()
@@ -803,13 +858,15 @@ class BonjourMIDIAdvertiser:
         )
 
     def stop(self):
-        if self._avahi_proc:
-            self._avahi_proc.terminate()
-            try:
-                self._avahi_proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                self._avahi_proc.kill()
-            self._avahi_proc = None
+        for proc in (self._avahi_proc, self._addr_proc):
+            if proc:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        self._avahi_proc = None
+        self._addr_proc = None
         if self._zeroconf and self._info:
             self._zeroconf.unregister_service(self._info)
         if self._zeroconf:

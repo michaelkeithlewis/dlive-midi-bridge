@@ -398,13 +398,19 @@ def _handle_peers():
                         dat = "✓" if p.get("data_ok") else "·"
                         send_to = p.get("data_addr", "?")
                         rx = p.get("rx_count", 0)
+                        tx = p.get("tx_count", 0)
                         lines.append(
                             f"    {icon} {p['host']}:{p['port']}"
                         )
                         lines.append(
                             f"      ctrl={ctrl}  data={dat}  "
-                            f"rx={rx}  tx→ {send_to}"
+                            f"rx={rx}  tx={tx}  tx→ {send_to}"
                         )
+                        if tx > 0 and rx == 0:
+                            lines.append(
+                                f"      ⚠ Sending but peer never replies — "
+                                f"check Auracle: is 'FOH' connected + routed?"
+                            )
                 else:
                     lines.append("  (no peers — waiting for Bonjour discovery)")
 
@@ -422,17 +428,14 @@ def _handle_peers():
                     lines.append("  ✗ dLive TCP connection FAILED")
                     lines.append("    Check: is the dLive IP correct and reachable?")
                     lines.append(f"    Try: ping {dlive.get('host', '?')}")
-                elif as_rx < 5:
-                    lines.append("")
-                    lines.append("  ⚠ dLive TCP seems unhealthy (very few Active Sense)")
-                    lines.append("    Expected: hundreds. Got: " + str(as_rx))
-                    lines.append("    Check: is the Pi on the same subnet as the dLive?")
-                elif midi_out == 0:
-                    lines.append("")
-                    lines.append("  ⚠ dLive connected but has sent 0 MIDI messages.")
-                    lines.append("    dLive only sends MIDI for console-originated events")
-                    lines.append("    (scene recalls, fader moves, etc.)")
-                    lines.append("    Check: Utility → MIDI → enable TCP MIDI Output")
+                elif midi_out > 0 and sendable > 0:
+                    any_tx = any(p.get("tx_count", 0) > 0 for p in peers)
+                    any_rx_from_peer = any(p.get("rx_count", 0) > 0 for p in peers)
+                    if any_tx and not any_rx_from_peer:
+                        lines.append("")
+                        lines.append("  ⚠ Pi is SENDING to peers but getting nothing back.")
+                        lines.append("    In Auracle: make sure 'FOH' is connected and")
+                        lines.append("    MIDI is routed FROM 'FOH' to your output port.")
 
                 lines.append("")
                 lines.append(f"  Updated: {int(age)}s ago")
