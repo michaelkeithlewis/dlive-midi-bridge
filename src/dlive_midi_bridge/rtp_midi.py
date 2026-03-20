@@ -83,10 +83,12 @@ class AppleMIDISession:
         name: str,
         midi_callback: Callable[[bytes], None],
         local_port: int = 5004,
+        auto_data_invite: bool = True,
     ):
         self.name = name
         self.midi_callback = midi_callback
         self.local_port = local_port
+        self.auto_data_invite = auto_data_invite
 
         self.ssrc = random.randint(0, 0xFFFFFFFF)
         self._peers: dict[tuple, _PeerInfo] = {}            # keyed by (host, control_port)
@@ -476,9 +478,10 @@ class AppleMIDISession:
             ack = self._build_invitation_ack(token)
             reply_transport.sendto(ack, addr)
 
-            # After accepting a control-port invitation, send our own data-port
-            # invitation so the peer knows we want bidirectional data flow
-            if not is_data_port:
+            # Optional compatibility behavior:
+            # Some peers expect us to actively send a data-port invitation after
+            # accepting control. In passive/CoreMIDI-like mode this is disabled.
+            if not is_data_port and self.auto_data_invite:
                 loop = asyncio.get_event_loop()
                 loop.create_task(self._send_data_invitation(peer))
 
@@ -1013,6 +1016,7 @@ class RTPMIDIReceiver:
             name=self.session_name,
             midi_callback=self.midi_callback,
             local_port=self.local_port,
+            auto_data_invite=not self.passive_mode,
         )
         await self._session.start(self._loop, bind_ip=self.bind_ip)
 

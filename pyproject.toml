@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dlive-midi-bridge"
-version = "0.7.7"
+version = "0.7.8"
 description = "RTP-MIDI to Allen & Heath dLive TCP bridge — eliminate the Mac Mini"
 readme = "README.md"
 license = {text = "MIT"}
