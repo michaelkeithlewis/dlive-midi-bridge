@@ -28,6 +28,8 @@ from . import __version__
 from .bridge import STATUS_FILE
 from .dlive_tcp import DLIVE_MIXRACK_PORT
 
+logger = logging.getLogger(__name__)
+
 
 # ── Config auto-discovery ────────────────────────────────────────────
 
@@ -132,8 +134,17 @@ def _handle_status():
     if config_path:
         config = _load_config(config_path)
         print(f"  Config:    {config_path}")
-        if config.get("bind_ip"):
-            print(f"  Interface: {config['bind_ip']}")
+        iface = config.get("bind_interface")
+        ip = config.get("bind_ip")
+        if iface and ip:
+            from .rtp_midi import resolve_interface_ip
+            current = resolve_interface_ip(iface)
+            if current and current != ip:
+                print(f"  Interface: {iface} ({current})  [config has {ip} — will auto-resolve]")
+            else:
+                print(f"  Interface: {iface} ({ip})")
+        elif ip:
+            print(f"  Interface: {ip}")
         print(f"  dLive IP:  {config.get('dlive_ip', 'not set')}")
         print(f"  Session:   {config.get('session_name', 'dLive-MIDI-Bridge')}")
     else:
@@ -557,7 +568,20 @@ def _handle_run(args):
 
     enable_local_midi = getattr(args, "local_midi", False) or config.get("local_midi", False)
     local_midi_filter = getattr(args, "local_midi_filter", None) or config.get("local_midi_filter")
+    # Resolve bind IP: prefer interface name (survives DHCP changes), fall back to static IP
+    bind_interface = config.get("bind_interface")
     bind_ip = config.get("bind_ip")
+    if bind_interface:
+        from .rtp_midi import resolve_interface_ip
+        resolved = resolve_interface_ip(bind_interface)
+        if resolved:
+            logger.info(f"Resolved {bind_interface} → {resolved}")
+            bind_ip = resolved
+        else:
+            logger.warning(
+                f"Could not resolve IP for interface '{bind_interface}', "
+                f"falling back to bind_ip={bind_ip}"
+            )
     snapshot_note_shim = config.get("snapshot_note_shim", True)
     snapshot_pc_channel = config.get("snapshot_pc_channel", 8)
     snapshot_pc_program = config.get("snapshot_pc_program", 7)

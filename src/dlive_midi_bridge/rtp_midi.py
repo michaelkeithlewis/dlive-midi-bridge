@@ -96,7 +96,7 @@ class AppleMIDISession:
         self._control_transport: Optional[asyncio.DatagramTransport] = None
         self._data_transport: Optional[asyncio.DatagramTransport] = None
         self._sync_task: Optional[asyncio.Task] = None
-        self._sequence = 0
+        self._sequence = random.randint(1, 0xFFFF)
         self._tx_count = 0
 
     # ── Protocol message builders ────────────────────────────────────
@@ -257,12 +257,13 @@ class AppleMIDISession:
     # ── RTP-MIDI send ────────────────────────────────────────────────
 
     def _build_rtp_midi_packet(self, midi_data: bytes) -> bytes:
-        """Wrap raw MIDI bytes in an RTP packet.
+        """Wrap raw MIDI bytes in an RTP packet matching CoreMIDI wire format.
 
-        Uses the simplest valid RTP-MIDI format:
-          - Marker bit set (0x80) — CoreMIDI convention
-          - J=0, Z=0, P=0 — no journal, no delta-times, no phantom
-          - Short or long MIDI command header depending on payload size
+        Format:
+          - Marker bit set (M=1)
+          - J=1 with minimal 3-byte recovery journal (required by many
+            implementations including iConnectivity firmware)
+          - Z=0, P=0 — no delta-times, no phantom
         """
         self._sequence = (self._sequence + 1) & 0xFFFF
         timestamp = self._now_ts() & 0xFFFFFFFF
@@ -279,13 +280,18 @@ class AppleMIDISession:
         midi_len = len(midi_data)
         if midi_len > 15:
             midi_cmd_header = bytes([
-                0x80 | ((midi_len >> 8) & 0x0F),
+                0x80 | 0x40 | ((midi_len >> 8) & 0x0F),
                 midi_len & 0xFF,
             ])
         else:
-            midi_cmd_header = bytes([midi_len & 0x0F])
+            midi_cmd_header = bytes([0x40 | (midi_len & 0x0F)])
 
-        return rtp_header + midi_cmd_header + midi_data
+        # Minimal recovery journal: 3-byte header only.
+        # S=0 Y=0 A=0 H=0 TOTCHAN=0000, checkpoint = previous seqnum
+        checkpoint = (self._sequence - 1) & 0xFFFF
+        recovery_journal = struct.pack(">BH", 0x00, checkpoint)
+
+        return rtp_header + midi_cmd_header + midi_data + recovery_journal
 
     def send_midi(self, data: bytes):
         """Broadcast MIDI bytes to every known peer."""
@@ -309,13 +315,24 @@ class AppleMIDISession:
         packet = self._build_rtp_midi_packet(data)
         for peer in sendable:
             try:
-                self._data_transport.sendto(packet, peer.data_addr)
+                # Some implementations use non-standard control/data pairing.
+                # Until we see real inbound RTP from a peer, transmit to the
+                # likely candidates so one-way sessions can still bootstrap.
+                destinations: set[tuple[str, int]] = {peer.data_addr}
+                if peer.rx_count == 0:
+                    destinations.add(peer.addr)
+                    if peer.addr[1] > 1:
+                        destinations.add((peer.addr[0], peer.addr[1] - 1))
+                    destinations.add((peer.addr[0], peer.addr[1] + 1))
+
+                for dest in destinations:
+                    self._data_transport.sendto(packet, dest)
                 self._tx_count += 1
                 peer.tx_count += 1
                 if self._tx_count <= 5:
                     logger.info(
                         f"*** RTP-MIDI tx #{self._tx_count} → "
-                        f"{peer.data_addr[0]}:{peer.data_addr[1]} "
+                        f"{','.join(f'{d[0]}:{d[1]}' for d in sorted(destinations))} "
                         f"[{len(data)} bytes]: {data.hex(' ')} "
                         f"(pkt {len(packet)} bytes, seq={self._sequence}) ***"
                     )
@@ -537,20 +554,20 @@ class AppleMIDISession:
                 p.data_ok = False
                 logger.info(f"Peer {ctrl_key} sent BYE")
 
-    def _handle_control_message(self, data: bytes, addr: tuple):
-        if self._control_transport:
-            self._handle_apple_midi(data, addr, self._control_transport, is_data_port=False)
-
-    def _handle_data_message(self, data: bytes, addr: tuple):
-        if len(data) >= 4:
-            sig = struct.unpack(">H", data[:2])[0]
-            if sig == APPLEMIDI_SIGNATURE:
-                if self._data_transport:
-                    self._handle_apple_midi(data, addr, self._data_transport, is_data_port=True)
-                return
-
-        # Actual RTP MIDI data — find the peer and capture real data address.
+    def _handle_incoming_rtp(self, data: bytes, addr: tuple):
+        """Process RTP MIDI payload from either socket and learn peer data port."""
         peer = self._find_peer_by_data_addr(addr)
+        if peer is None:
+            # Try exact control-port key, then +/-1 variants.
+            candidates = (
+                (addr[0], addr[1]),
+                (addr[0], addr[1] - 1),
+                (addr[0], addr[1] + 1),
+            )
+            for key in candidates:
+                if key in self._peers:
+                    peer = self._peers[key]
+                    break
 
         if peer:
             peer.data_addr = addr
@@ -565,7 +582,7 @@ class AppleMIDISession:
         midi_bytes = self._extract_midi_from_rtp(data)
         if midi_bytes:
             logger.info(
-                f"RTP-MIDI rx ← {addr[0]} [{len(midi_bytes)} bytes]: "
+                f"RTP-MIDI rx ← {addr[0]}:{addr[1]} [{len(midi_bytes)} bytes]: "
                 f"{midi_bytes.hex(' ')}"
             )
             self.midi_callback(midi_bytes)
@@ -575,6 +592,23 @@ class AppleMIDISession:
                     f"RTP packet from {addr} but no MIDI extracted "
                     f"(len={len(data)}, hdr={data[:4].hex(' ')})"
                 )
+
+    def _handle_control_message(self, data: bytes, addr: tuple):
+        if len(data) >= 4 and struct.unpack(">H", data[:2])[0] == APPLEMIDI_SIGNATURE:
+            if self._control_transport:
+                self._handle_apple_midi(data, addr, self._control_transport, is_data_port=False)
+            return
+        self._handle_incoming_rtp(data, addr)
+
+    def _handle_data_message(self, data: bytes, addr: tuple):
+        if len(data) >= 4:
+            sig = struct.unpack(">H", data[:2])[0]
+            if sig == APPLEMIDI_SIGNATURE:
+                if self._data_transport:
+                    self._handle_apple_midi(data, addr, self._data_transport, is_data_port=True)
+                return
+
+        self._handle_incoming_rtp(data, addr)
 
     # ── Session lifecycle ────────────────────────────────────────────
 
@@ -888,6 +922,31 @@ class BonjourMIDIAdvertiser:
         if self._zeroconf:
             self._zeroconf.close()
         logger.info("Bonjour advertisement stopped")
+
+
+def resolve_interface_ip(interface: str) -> Optional[str]:
+    """Get the current IPv4 address of a named network interface (e.g. 'eth0')."""
+    import re as _re
+    try:
+        if sys.platform == "linux":
+            result = subprocess.run(
+                ["ip", "-4", "-o", "addr", "show", "dev", interface],
+                capture_output=True, text=True, timeout=5,
+            )
+            m = _re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", result.stdout)
+            if m:
+                return m.group(1)
+        else:
+            result = subprocess.run(
+                ["ifconfig", interface],
+                capture_output=True, text=True, timeout=5,
+            )
+            m = _re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", result.stdout)
+            if m:
+                return m.group(1)
+    except Exception as e:
+        logger.debug(f"Could not resolve IP for interface {interface}: {e}")
+    return None
 
 
 def _get_local_ip() -> Optional[str]:

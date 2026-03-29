@@ -394,7 +394,8 @@ def _is_wifi(iface: dict) -> bool:
 
 # ── Wizard steps ─────────────────────────────────────────────────────
 
-def step_network_interface() -> Optional[str]:
+def step_network_interface() -> tuple[Optional[str], Optional[str]]:
+    """Returns (bind_ip, bind_interface) e.g. ('192.168.1.108', 'eth0')."""
     step_header(1, "Network Interface")
 
     interfaces = get_network_interfaces()
@@ -402,7 +403,7 @@ def step_network_interface() -> Optional[str]:
     if not interfaces:
         warn("Could not detect any active network interfaces.")
         print("  The bridge will listen on all interfaces.\n")
-        return None
+        return None, None
 
     wired = [i for i in interfaces if not _is_wifi(i)]
     wifi = [i for i in interfaces if _is_wifi(i)]
@@ -416,13 +417,14 @@ def step_network_interface() -> Optional[str]:
             if len(wifi) == 1:
                 chosen = wifi[0]
                 ok(f"Using {chosen['label']}  ({chosen['ip']})")
-                return chosen["ip"]
+                return chosen["ip"], chosen["device"]
             options = [
                 (i["ip"], f"{i['label']:30s}  {i['ip']}")
                 for i in wifi
             ]
             ip = ask_choice("Which interface?", options)
-            return ip
+            device = next((i["device"] for i in wifi if i["ip"] == ip), None)
+            return ip, device
         else:
             print("  Plug in an ethernet cable and run 'dlive setup' again.\n")
             sys.exit(0)
@@ -432,7 +434,7 @@ def step_network_interface() -> Optional[str]:
     if len(display) == 1:
         chosen = display[0]
         ok(f"Found: {chosen['label']}  ({chosen['ip']})")
-        return chosen["ip"]
+        return chosen["ip"], chosen["device"]
 
     print("  Multiple wired interfaces found:\n")
     options = [
@@ -440,7 +442,8 @@ def step_network_interface() -> Optional[str]:
         for i in display
     ]
     ip = ask_choice("Which interface should the bridge use?", options)
-    return ip
+    device = next((i["device"] for i in display if i["ip"] == ip), None)
+    return ip, device
 
 
 def step_dlive_ip(bind_ip: Optional[str] = None) -> str:
@@ -866,7 +869,7 @@ def run_wizard():
     _ensure_tty()
     banner()
 
-    bind_ip = step_network_interface()
+    bind_ip, bind_interface = step_network_interface()
     dlive_ip = step_dlive_ip(bind_ip)
     dlive_port = DLIVE_MIXRACK_PORT
     step_test_connection(dlive_ip, dlive_port)
@@ -878,6 +881,7 @@ def run_wizard():
         "dlive_ip": dlive_ip,
         "dlive_port": dlive_port,
         "bind_ip": bind_ip,
+        "bind_interface": bind_interface,
         "session_name": session_name,
         "filter_name": filter_name,
         "local_midi": enable_local_midi,

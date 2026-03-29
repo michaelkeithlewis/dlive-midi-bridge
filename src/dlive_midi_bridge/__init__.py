@@ -5,4 +5,4 @@ Receives MIDI over the network (RTP-MIDI / Apple Network MIDI / Bonjour)
 and forwards raw MIDI bytes to a dLive MixRack or Surface via TCP port 51325.
 """
 
-__version__ = "0.7.8"
+__version__ = "0.8.0"
