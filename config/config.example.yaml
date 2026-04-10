@@ -35,6 +35,14 @@ local_midi: false
 # Useful when multiple devices are connected.
 # local_midi_filter: "nanoKONTROL"
 
+# ── Network binding ──────────────────────────────────────────────────
+# Prefer bind_interface (e.g. eth0) so DHCP IP changes do not break the bridge.
+# bind_interface: "eth0"
+# bind_ip: "192.168.1.108"
+
+# passive_mode: true   # do not auto-invite every peer found via Bonjour
+# auto_data_invite: true   # after peer connects, send data-port invite (needed for some hardware)
+
 # ── Logging ──────────────────────────────────────────────────────────
 # Log every MIDI message (great for debugging, noisy in production)
 log_midi: false

@@ -896,6 +896,9 @@ def run_wizard():
         # Passive mode matches macOS Network MIDI behavior:
         # advertise + accept incoming, no auto-invites to discovered peers.
         "passive_mode": True,
+        # After a peer's control invitation, invite their data port too.
+        # Keep True for iConnectivity / strict peers (independent of passive_mode).
+        "auto_data_invite": True,
     }
 
     config_path = step_write_config(config)

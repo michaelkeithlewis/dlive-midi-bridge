@@ -1002,6 +1002,7 @@ class RTPMIDIReceiver:
         filter_name: Optional[str] = None,
         bind_ip: Optional[str] = None,
         passive_mode: bool = False,
+        auto_data_invite: bool = True,
     ):
         self.midi_callback = midi_callback
         self.session_name = session_name
@@ -1009,6 +1010,11 @@ class RTPMIDIReceiver:
         self.filter_name = filter_name
         self.bind_ip = bind_ip
         self.passive_mode = passive_mode
+        # After accepting a peer's control-port invitation, send our invitation
+        # to their data port.  Independent of passive_mode (which only suppresses
+        # Bonjour-driven invites).  Some peers (e.g. iConnectivity) need this to
+        # accept outbound RTP from us.
+        self.auto_data_invite = auto_data_invite
 
         self._session: Optional[AppleMIDISession] = None
         self._browser: Optional[BonjourMIDIBrowser] = None
@@ -1075,7 +1081,7 @@ class RTPMIDIReceiver:
             name=self.session_name,
             midi_callback=self.midi_callback,
             local_port=self.local_port,
-            auto_data_invite=not self.passive_mode,
+            auto_data_invite=self.auto_data_invite,
         )
         await self._session.start(self._loop, bind_ip=self.bind_ip)
 
@@ -1089,7 +1095,10 @@ class RTPMIDIReceiver:
 
         # 3. Browse for existing sessions and send invitations (unless passive mode)
         if self.passive_mode:
-            logger.info("Passive mode enabled: waiting for peers to initiate connection")
+            logger.info(
+                "Passive mode: Bonjour browser off — peers connect to us; "
+                f"reverse data-port invite={'on' if self.auto_data_invite else 'off'}"
+            )
         else:
             self._browser = BonjourMIDIBrowser(
                 on_discovered=self._on_peer_discovered,
