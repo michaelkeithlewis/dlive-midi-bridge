@@ -326,12 +326,16 @@ def wifi_forget(name):
 # ── Tailscale (remote access to the console over the tailnet) ─────────
 # The Pi runs as a subnet router advertising the console LAN, so dLive
 # Director can reach the CDM48 (dlive_ip) from anywhere on the tailnet.
-TAILSCALE_SUBNET = "192.168.1.0/24"
-
-
 def _console_ip():
     cfg, _ = load_config()
     return cfg.get("dlive_ip") or "192.168.1.70"
+
+
+def _advertise_route():
+    # Advertise ONLY the console, as a /32 host route. A /32 is more specific
+    # than any local /24, so the MixRack stays reachable over Tailscale even
+    # when the remote network is itself 192.168.1.x — no whole-subnet collision.
+    return _console_ip() + "/32"
 
 
 def tailscale_status():
@@ -340,7 +344,7 @@ def tailscale_status():
     info = {"installed": True, "state": "Unknown", "running": False,
             "logged_in": False, "self_ip": None, "self_name": None,
             "online": False, "advertised": [], "approved": [],
-            "route_ok": False, "subnet": TAILSCALE_SUBNET,
+            "route_ok": False, "subnet": _advertise_route(),
             "console_ip": _console_ip(), "peers": 0, "login_url": None}
     rc, out, err = _run(["tailscale", "status", "--json"], timeout=10)
     try:
@@ -365,7 +369,7 @@ def tailscale_status():
         info["advertised"] = (json.loads(out2) or {}).get("AdvertiseRoutes") or []
     except Exception:
         pass
-    info["route_ok"] = TAILSCALE_SUBNET in (info["approved"] or [])
+    info["route_ok"] = _advertise_route() in (info["approved"] or [])
     if not info["logged_in"]:
         url = data.get("AuthURL") if data else None
         if not url:
@@ -381,7 +385,7 @@ def tailscale_up():
         return False, "tailscale not installed"
     # non-blocking: kick off; auth/login URL (if needed) surfaces in status
     rc, out, err = _run(
-        ["sudo", "-n", "tailscale", "up", "--advertise-routes=" + TAILSCALE_SUBNET,
+        ["sudo", "-n", "tailscale", "up", "--advertise-routes=" + _advertise_route(),
          "--accept-dns=false", "--hostname=dlive-bridge", "--timeout=8s"], timeout=15)
     msg = (err or out or "").strip()
     m = re.search(r"https://login\.tailscale\.com/\S+", msg)
