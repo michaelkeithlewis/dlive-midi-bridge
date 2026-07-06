@@ -323,6 +323,80 @@ def wifi_forget(name):
     return rc == 0, (out or err or "deleted").strip()
 
 
+# ── Tailscale (remote access to the console over the tailnet) ─────────
+# The Pi runs as a subnet router advertising the console LAN, so dLive
+# Director can reach the CDM48 (dlive_ip) from anywhere on the tailnet.
+TAILSCALE_SUBNET = "192.168.1.0/24"
+
+
+def _console_ip():
+    cfg, _ = load_config()
+    return cfg.get("dlive_ip") or "192.168.1.70"
+
+
+def tailscale_status():
+    if not shutil.which("tailscale"):
+        return {"installed": False}
+    info = {"installed": True, "state": "Unknown", "running": False,
+            "logged_in": False, "self_ip": None, "self_name": None,
+            "online": False, "advertised": [], "approved": [],
+            "route_ok": False, "subnet": TAILSCALE_SUBNET,
+            "console_ip": _console_ip(), "peers": 0, "login_url": None}
+    rc, out, err = _run(["tailscale", "status", "--json"], timeout=10)
+    try:
+        data = json.loads(out) if out.strip() else {}
+    except Exception:
+        data = {}
+    if data:
+        info["state"] = data.get("BackendState", "Unknown")
+        info["running"] = info["state"] == "Running"
+        info["logged_in"] = info["state"] not in ("NeedsLogin", "NoState")
+        self_ = data.get("Self") or {}
+        ips = self_.get("TailscaleIPs") or []
+        info["self_ip"] = next((ip for ip in ips if ":" not in ip),
+                               ips[0] if ips else None)
+        info["self_name"] = (self_.get("DNSName") or "").rstrip(".")
+        info["online"] = bool(self_.get("Online"))
+        info["approved"] = self_.get("AllowedIPs") or []
+        info["peers"] = len(data.get("Peer") or {})
+    # advertised routes come from prefs, not status
+    rc2, out2, _ = _run(["tailscale", "debug", "prefs"], timeout=8)
+    try:
+        info["advertised"] = (json.loads(out2) or {}).get("AdvertiseRoutes") or []
+    except Exception:
+        pass
+    info["route_ok"] = TAILSCALE_SUBNET in (info["approved"] or [])
+    if not info["logged_in"]:
+        url = data.get("AuthURL") if data else None
+        if not url:
+            m = re.search(r"https://login\.tailscale\.com/[A-Za-z0-9/_.-]+",
+                          (out or "") + (err or ""))
+            url = m.group(0) if m else None
+        info["login_url"] = url
+    return info
+
+
+def tailscale_up():
+    if not shutil.which("tailscale"):
+        return False, "tailscale not installed"
+    # non-blocking: kick off; auth/login URL (if needed) surfaces in status
+    rc, out, err = _run(
+        ["sudo", "-n", "tailscale", "up", "--advertise-routes=" + TAILSCALE_SUBNET,
+         "--accept-dns=false", "--hostname=dlive-bridge", "--timeout=8s"], timeout=15)
+    msg = (err or out or "").strip()
+    m = re.search(r"https://login\.tailscale\.com/\S+", msg)
+    if m:
+        return True, "Authorize this node: " + m.group(0)
+    return rc == 0, msg or "tailscale up"
+
+
+def tailscale_down():
+    if not shutil.which("tailscale"):
+        return False, "tailscale not installed"
+    rc, out, err = _run(["sudo", "-n", "tailscale", "down"], timeout=15)
+    return rc == 0, (err or out or "stopped").strip()
+
+
 # ── LAN device scan (lanscan-style, stdlib only) ─────────────────────
 # Strategy on an offline Pi with no nmap/arp-scan:
 #   1. Fan out unprivileged `ping` across the local /24 to populate the
@@ -543,6 +617,8 @@ class Handler(BaseHTTPRequestHandler):
             if p == "/api/wifi/state":
                 return self._send(200, {"current": wifi_current(),
                                         "saved": wifi_saved()})
+            if p == "/api/tailscale/status":
+                return self._send(200, tailscale_status())
             if p == "/api/devices/interfaces":
                 return self._send(200, {"interfaces": list_interfaces()})
             if p == "/api/devices/scan":
@@ -575,6 +651,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200 if ok else 400, {"ok": ok, "message": msg})
             if p == "/api/wifi/forget":
                 ok, msg = wifi_forget(body.get("name", ""))
+                return self._send(200 if ok else 400, {"ok": ok, "message": msg})
+            if p == "/api/tailscale/up":
+                ok, msg = tailscale_up()
+                return self._send(200 if ok else 400, {"ok": ok, "message": msg})
+            if p == "/api/tailscale/down":
+                ok, msg = tailscale_down()
                 return self._send(200 if ok else 400, {"ok": ok, "message": msg})
             return self._send(404, {"error": "not found"})
         except Exception as e:
@@ -632,6 +714,7 @@ td .tag{font-size:11px;padding:1px 7px;border-radius:20px;background:var(--bg);b
  <button data-t="monitor">MIDI Monitor</button>
  <button data-t="devices">Devices</button>
  <button data-t="network">Network</button>
+ <button data-t="remote">Remote</button>
 </nav>
 <main>
  <section id="dash">
@@ -707,21 +790,48 @@ td .tag{font-size:11px;padding:1px 7px;border-radius:20px;background:var(--bg);b
    </div>
   </div>
  </section>
+
+ <section id="remote" hidden>
+  <div class="card">
+   <div class="row"><b>Remote access (Tailscale)</b>
+    <span class="dot" id="tsDot" style="margin-left:6px"></span>
+    <button class="act ghost" style="margin-left:auto" onclick="loadTailscale()">Refresh</button>
+   </div>
+   <div id="tsBody" class="hint" style="margin-top:10px">…</div>
+   <div class="row" style="margin-top:12px">
+    <button class="act" id="tsUp" onclick="tsAction('up')">Start / re-advertise</button>
+    <button class="act ghost" id="tsDown" onclick="tsAction('down')">Stop</button>
+   </div>
+  </div>
+  <div class="card">
+   <b>How to connect from anywhere</b>
+   <div class="hint" style="margin-top:8px">
+    1. Install Tailscale on your laptop/phone and sign in to the same tailnet.<br>
+    2. Make sure this node's advertised route is <b>approved</b> in the Tailscale admin console (Machines → dlive-bridge → Subnet routes).<br>
+    3. Open <b>dLive Director</b> and connect to the MixRack by IP: <b id="tsConsole">192.168.1.70</b> — reachable from anywhere while the Pi is online.
+   </div>
+  </div>
+ </section>
 </main>
 <div class="toast" id="toast"></div>
 <script>
 const $=s=>document.querySelector(s), api=(u,o)=>fetch(u,o).then(r=>r.json());
 let cfg={}, editable=[], logTimer=null;
 function toast(m,bad){const t=$('#toast');t.textContent=m;t.className='toast show'+(bad?' bad':'');setTimeout(()=>t.className='toast',2600);}
-document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
- document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));
- b.classList.add('active');
- ['dash','settings','monitor','devices','network'].forEach(id=>$('#'+id).hidden=(id!==b.dataset.t));
- if(b.dataset.t==='monitor')startLog(); else stopLog();
- if(b.dataset.t==='settings')loadCfg();
- if(b.dataset.t==='devices')initDevices();
- if(b.dataset.t==='network')loadNet();
-});
+const TABS=['dash','settings','monitor','devices','network','remote'];
+function showTab(t){
+ if(!TABS.includes(t))t='dash';
+ document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('active',x.dataset.t===t));
+ TABS.forEach(id=>$('#'+id).hidden=(id!==t));
+ try{localStorage.setItem('dlive.tab',t);}catch(e){}
+ if(t==='monitor')startLog(); else stopLog();
+ if(t==='settings')loadCfg();
+ if(t==='devices')initDevices();
+ if(t==='network')loadNet();
+ if(t==='remote')loadTailscale();
+ if(t==='dash')refresh();
+}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>showTab(b.dataset.t));
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let devIfaces=[];
 async function initDevices(){
@@ -812,7 +922,24 @@ async function forgetSaved(name){if(!confirm('Forget "'+name+'"?'))return;const 
 async function scanWifi(){$('#wifiList').textContent='Scanning…';const d=await api('/api/wifi/scan');if(!d.available){$('#wifiList').textContent='nmcli not available on this device.';return;}$('#wifiList').innerHTML=(d.networks||[]).map(w=>`<div class="wifi" onclick="pickWifi('${w.ssid.replace(/'/g,"\\'")}')"><span>${w.ssid} ${w.active?'<span class=pill>connected</span>':''}</span><span class="s">${w.signal}% · ${w.security}</span></div>`).join('')||'No networks found.';}
 function pickWifi(ssid){$('#wifiSsid').textContent=ssid;$('#wifiJoin').hidden=false;$('#wifiPw').value='';$('#wifiPw').focus();$('#wifiJoin').dataset.ssid=ssid;}
 async function joinWifi(){const ssid=$('#wifiJoin').dataset.ssid,pw=$('#wifiPw').value;toast('Joining '+ssid+'…');const r=await api('/api/wifi/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password:pw})});toast(r.message||(r.ok?'joined':'failed'),!r.ok);if(r.ok){$('#wifiJoin').hidden=true;loadNet();}}
-refresh();setInterval(()=>{if(!$('#dash').hidden)refresh();},4000);
+async function loadTailscale(){
+ const d=await api('/api/tailscale/status');const dot=$('#tsDot');
+ if(!d.installed){dot.className='dot off';$('#tsBody').innerHTML='Tailscale is not installed on the Pi.';return;}
+ dot.className='dot '+(d.running?'on':'off');
+ const rows=[['State',d.state+(d.online?' · online':'')]];
+ if(d.self_ip)rows.push(['Tailnet IP',d.self_ip]);
+ if(d.self_name)rows.push(['MagicDNS name',d.self_name]);
+ rows.push(['Advertised route',(d.advertised&&d.advertised.length)?d.advertised.join(', '):'—']);
+ rows.push(['Route approved',d.route_ok?'✓ yes':'✗ pending — approve in admin console']);
+ rows.push(['Console (CDM48)',d.console_ip+((d.route_ok&&d.running)?' — reachable remotely':'')]);
+ rows.push(['Peers on tailnet',d.peers]);
+ let html=rows.map(r=>`<div><span style="color:var(--mut)">${r[0]}:</span> <b>${esc(r[1])}</b></div>`).join('');
+ if(d.login_url)html+=`<div style="margin-top:8px">⚠️ Needs login — <a href="${esc(d.login_url)}" target="_blank" style="color:var(--acc)">authorize this node ↗</a></div>`;
+ $('#tsBody').innerHTML=html;$('#tsConsole').textContent=d.console_ip;
+}
+async function tsAction(a){toast('Tailscale '+a+'…');const r=await api('/api/tailscale/'+a,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});toast(r.message||(r.ok?'ok':'failed'),!r.ok);setTimeout(loadTailscale,1600);}
+(function(){let t='dash';try{t=localStorage.getItem('dlive.tab')||'dash';}catch(e){}showTab(t);})();
+setInterval(()=>{if(!$('#dash').hidden)refresh();},4000);
 </script></body></html>"""
 
 

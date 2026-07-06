@@ -1,0 +1,12 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!-- Install to /etc/avahi/services/ so the web panel is discoverable by name.
+     Also set `allow-interfaces=eth0,wlan0` in /etc/avahi/avahi-daemon.conf so
+     dlive-bridge.local resolves on both the console LAN and WiFi. -->
+<service-group>
+  <name replace-wildcards="yes">dLive Bridge (%h)</name>
+  <service>
+    <type>_http._tcp</type>
+    <port>8080</port>
+  </service>
+</service-group>
