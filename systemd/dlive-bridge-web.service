@@ -1,0 +1,21 @@
+[Unit]
+Description=dLive Bridge Web Control Panel
+After=network-online.target dlive-midi-bridge.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dlive
+# Runs the stdlib web panel from the same venv as the bridge.
+ExecStart=/home/dlive/.local/share/dlive-midi-bridge/.venv/bin/python3 -m dlive_midi_bridge.webapp --bind 0.0.0.0 --port 8080
+Restart=always
+RestartSec=5
+
+# Hardening (kept compatible with the panel's needs: it shells out to
+# systemctl/nmcli via sudo and reads the bridge status file in /tmp).
+NoNewPrivileges=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
