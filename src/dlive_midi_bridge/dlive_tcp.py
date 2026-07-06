@@ -15,6 +15,7 @@ Reference:
 
 import asyncio
 import logging
+import socket
 import time
 from typing import Callable, Optional
 
@@ -27,7 +28,19 @@ DLIVE_SURFACE_PORT = 51328          # Surface, no encryption
 DLIVE_SURFACE_PORT_TLS = 51329     # Surface, TLS
 
 MIDI_ACTIVE_SENSE = 0xFE
-KEEPALIVE_TIMEOUT = 5.0  # seconds without active sense = stale
+# Some dLive firmwares emit Active Sense (0xFE) ~every 300ms; others do not
+# send it at all. So the Active-Sense watchdog is ADAPTIVE: it only enforces
+# this timeout once we've actually seen Active Sense from this console. For
+# consoles that never send it, we rely on TCP keepalive (below) instead.
+KEEPALIVE_TIMEOUT = 5.0  # seconds without Active Sense (once seen) = stale
+
+# TCP-level keepalive: the reliable, traffic-independent half-open detector.
+# Kernel probes an idle peer; a dead link (yanked cable, console power-cut,
+# switch glitch) is detected in ~KEEPIDLE + KEEPINTVL*KEEPCNT seconds even
+# when no application data flows and no Active Sense is sent.
+TCP_KEEPIDLE_S = 5
+TCP_KEEPINTVL_S = 2
+TCP_KEEPCNT = 3
 
 
 class DLiveTCPConnection:
@@ -66,8 +79,14 @@ class DLiveTCPConnection:
         self._writer: Optional[asyncio.StreamWriter] = None
         self._connected = False
         self._last_active_sense = 0.0
+        self._active_sense_seen = False      # has THIS console ever sent 0xFE?
+        self._last_rx = 0.0                  # monotonic time of last inbound bytes
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._closing = False                # True only during graceful shutdown
+        self._down_fired = False             # idempotency guard for _mark_down
         self._reconnect_task: Optional[asyncio.Task] = None
         self._read_task: Optional[asyncio.Task] = None
+        self._watchdog_task: Optional[asyncio.Task] = None
         self._stats = {
             "midi_messages_sent": 0,
             "bytes_sent": 0,
@@ -86,25 +105,58 @@ class DLiveTCPConnection:
     async def connect(self):
         """Establish TCP connection to the dLive."""
         try:
+            self._loop = asyncio.get_running_loop()
             logger.info(f"Connecting to dLive at {self.host}:{self.port}...")
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(self.host, self.port),
                 timeout=10.0,
             )
             self._connected = True
-            self._last_active_sense = time.monotonic()
+            self._down_fired = False
+            self._active_sense_seen = False
+            now = time.monotonic()
+            self._last_active_sense = now
+            self._last_rx = now
+            self._enable_tcp_keepalive()
             logger.info(f"Connected to dLive at {self.host}:{self.port}")
 
             if self.on_connected:
                 self.on_connected()
 
-            # Start reading incoming data (Active Sense, etc.)
+            # Start reading incoming data (Active Sense, etc.) and the
+            # connection-health watchdog.
             self._read_task = asyncio.create_task(self._read_loop())
+            self._watchdog_task = asyncio.create_task(self._keepalive_watchdog())
 
         except (ConnectionRefusedError, OSError, asyncio.TimeoutError) as e:
             logger.warning(f"Connection to dLive failed: {e}")
             self._connected = False
             self._schedule_reconnect()
+
+    def _enable_tcp_keepalive(self):
+        """Turn on TCP keepalive so a half-open link is detected by the kernel
+        even when no application data flows. Tuning options are Linux-specific
+        and skipped gracefully where unavailable (e.g. macOS during tests)."""
+        if not self._writer:
+            return
+        sock = self._writer.get_extra_info("socket")
+        if sock is None:
+            return
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            for name, val in (
+                ("TCP_KEEPIDLE", TCP_KEEPIDLE_S),
+                ("TCP_KEEPINTVL", TCP_KEEPINTVL_S),
+                ("TCP_KEEPCNT", TCP_KEEPCNT),
+            ):
+                opt = getattr(socket, name, None)
+                if opt is not None:
+                    try:
+                        sock.setsockopt(socket.IPPROTO_TCP, opt, val)
+                    except OSError:
+                        pass
+        except OSError as e:
+            logger.debug(f"Could not set TCP keepalive: {e}")
 
     @staticmethod
     def _midi_msg_length(status: int) -> int:
@@ -125,12 +177,15 @@ class DLiveTCPConnection:
             while self._connected and self._reader:
                 data = await self._reader.read(1024)
                 if not data:
-                    logger.warning("dLive closed the connection")
-                    break
+                    self._mark_down("dLive closed the connection (EOF)")
+                    return
+
+                self._last_rx = time.monotonic()
 
                 for byte_val in data:
                     if byte_val == MIDI_ACTIVE_SENSE:
                         self._last_active_sense = time.monotonic()
+                        self._active_sense_seen = True
                         self._stats["active_sense_received"] += 1
                         continue
 
@@ -209,35 +264,62 @@ class DLiveTCPConnection:
                         logger.debug(f"dLive rx MIDI: [{bytes(midi_buf).hex(' ')}]")
                         midi_buf = bytearray()
 
+        except asyncio.CancelledError:
+            # The watchdog (or shutdown) cancelled us after already marking the
+            # connection down. Just exit; do not fire another disconnect.
+            return
         except (ConnectionResetError, BrokenPipeError, OSError) as e:
-            logger.warning(f"Read error from dLive: {e}")
+            self._mark_down(f"read error: {e}")
         finally:
-            await self._handle_disconnect()
+            # Tear down this connection's watchdog (unless we ARE inside it).
+            wt = self._watchdog_task
+            if wt and wt is not asyncio.current_task():
+                wt.cancel()
 
-    async def _handle_disconnect(self):
-        """Handle a lost connection."""
+    def _mark_down(self, reason: str):
+        """Mark the connection dead and schedule a reconnect. Idempotent per
+        connection and safe to call from the read loop, the watchdog, or
+        send_midi (including from a non-loop thread)."""
+        if self._down_fired:
+            return
+        self._down_fired = True
         self._connected = False
-        if self._writer:
-            try:
-                self._writer.close()
-                await self._writer.wait_closed()
-            except Exception:
-                pass
+
+        w = self._writer
         self._writer = None
         self._reader = None
+        if w:
+            try:
+                w.close()          # sync close; no await so this is thread-safe
+            except Exception:
+                pass
 
-        logger.warning("Disconnected from dLive")
+        logger.warning(f"=== dLive connection LOST ({reason}) — will reconnect ===")
         if self.on_disconnected:
-            self.on_disconnected()
+            try:
+                self.on_disconnected()
+            except Exception:
+                pass
 
-        self._schedule_reconnect()
+        if not self._closing:
+            self._schedule_reconnect()
 
     def _schedule_reconnect(self):
-        """Schedule a reconnection attempt."""
-        loop = asyncio.get_event_loop()
+        """Schedule a reconnection attempt. Thread-safe: marshals onto the
+        event loop so it is valid to call from an rtmidi callback thread too."""
+        if self._closing:
+            return
+        loop = self._loop
+        if loop is None:
+            return
+        loop.call_soon_threadsafe(self._spawn_reconnect)
+
+    def _spawn_reconnect(self):
+        if self._closing or self._connected:
+            return
         if self._reconnect_task and not self._reconnect_task.done():
             return  # already scheduled
-        self._reconnect_task = loop.create_task(self._reconnect_loop())
+        self._reconnect_task = self._loop.create_task(self._reconnect_loop())
 
     async def _reconnect_loop(self):
         """Attempt to reconnect at regular intervals."""
@@ -249,6 +331,57 @@ class DLiveTCPConnection:
             )
             await asyncio.sleep(self.reconnect_interval)
             await self.connect()
+
+    async def _keepalive_watchdog(self):
+        """Connection-health watchdog, run once per connection.
+
+        Two checks, each ~1s:
+          1. Adaptive Active-Sense timeout — ONLY if this console has actually
+             sent 0xFE (some dLive firmwares never do). Avoids falsely killing
+             a healthy link on consoles that don't emit Active Sense.
+          2. Write backpressure — drain the write buffer with a timeout so a
+             stalled-but-open peer (TCP zero-window) is surfaced instead of
+             letting the send buffer grow unbounded. On a healthy socket
+             drain() returns immediately.
+
+        TCP keepalive (set at connect) is the traffic-independent backstop for
+        dead links; this watchdog adds faster, application-level detection.
+        """
+        try:
+            while self._connected:
+                await asyncio.sleep(1.0)
+                if not self._connected:
+                    return
+
+                if self._active_sense_seen:
+                    silence = time.monotonic() - self._last_active_sense
+                    if silence > KEEPALIVE_TIMEOUT:
+                        self._mark_down(
+                            f"no Active Sense for {silence:.1f}s "
+                            f"(> {KEEPALIVE_TIMEOUT}s; half-open link)"
+                        )
+                        self._cancel_read_task()
+                        return
+
+                w = self._writer
+                if w is not None:
+                    try:
+                        await asyncio.wait_for(w.drain(), timeout=KEEPALIVE_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        self._mark_down("write buffer stalled (backpressure)")
+                        self._cancel_read_task()
+                        return
+                    except (ConnectionResetError, BrokenPipeError, OSError) as e:
+                        self._mark_down(f"drain error: {e}")
+                        self._cancel_read_task()
+                        return
+        except asyncio.CancelledError:
+            return
+
+    def _cancel_read_task(self):
+        rt = self._read_task
+        if rt and rt is not asyncio.current_task() and not rt.done():
+            rt.cancel()
 
     def send_midi(self, data: bytes):
         """
@@ -271,7 +404,7 @@ class DLiveTCPConnection:
             return True
         except (ConnectionResetError, BrokenPipeError, OSError) as e:
             logger.warning(f"Send failed: {e}")
-            asyncio.get_event_loop().create_task(self._handle_disconnect())
+            self._mark_down(f"send failed: {e}")
             return False
 
     async def flush(self):
@@ -283,12 +416,14 @@ class DLiveTCPConnection:
                 pass
 
     async def disconnect(self):
-        """Gracefully close the connection."""
+        """Gracefully close the connection. Sets the closing flag first so no
+        reconnect is scheduled by the read loop / watchdog teardown (C5)."""
+        self._closing = True
+        self._down_fired = True   # suppress any _mark_down reconnect scheduling
         self._connected = False
-        if self._read_task:
-            self._read_task.cancel()
-        if self._reconnect_task:
-            self._reconnect_task.cancel()
+        for task in (self._read_task, self._watchdog_task, self._reconnect_task):
+            if task:
+                task.cancel()
         if self._writer:
             try:
                 self._writer.close()
