@@ -408,13 +408,28 @@ class AppleMIDISession:
             )
 
     async def _send_data_invitation(self, peer: _PeerInfo):
-        """Send a data-port invitation to a peer (used after accepting an incoming control invitation)."""
+        """Send a data-port invitation to a peer (used after accepting an incoming control invitation).
+
+        Retries a few times: a single lost UDP invitation would otherwise
+        permanently prevent the peer from accepting our outbound RTP, which
+        is the exact class of failure behind one-way sessions.
+        """
         await asyncio.sleep(0.05)
-        token = random.randint(0, 0xFFFFFFFF)
-        inv = self._build_invitation(token)
-        if self._data_transport:
-            self._data_transport.sendto(inv, peer.data_addr)
-            logger.info(f"Sent data-port invitation to {peer.addr[0]}:{peer.addr[1] + 1}")
+        for attempt in range(3):
+            if peer.data_ok:
+                return
+            token = random.randint(0, 0xFFFFFFFF)
+            inv = self._build_invitation(token)
+            if self._data_transport:
+                self._data_transport.sendto(inv, peer.data_addr)
+                logger.info(
+                    f"Sent data-port invitation to "
+                    f"{peer.data_addr[0]}:{peer.data_addr[1]} (attempt {attempt + 1})"
+                )
+            for _ in range(10):
+                await asyncio.sleep(0.1)
+                if peer.data_ok:
+                    return
 
     @property
     def has_connected_peers(self) -> bool:
@@ -530,6 +545,18 @@ class AppleMIDISession:
             if len(data) >= 33:
                 sender_ssrc = struct.unpack(">I", data[4:8])[0]
                 count = data[8]
+
+                # A syncing peer is a live peer. Register/refresh it so a peer
+                # that resumes sync after a bridge restart becomes sendable,
+                # rather than silently syncing forever with peers=0.
+                peer = self._get_or_create_peer(ctrl_addr)
+                peer.ssrc = sender_ssrc
+                if is_data_port:
+                    peer.data_addr = addr
+                    peer.data_ok = True
+                else:
+                    peer.ctrl_ok = True
+
                 # Standard layout: timestamps at offset 12 (after 3 pad bytes)
                 ts_off = 12 if len(data) >= 36 else 9
                 ts1 = struct.unpack(">Q", data[ts_off:ts_off + 8])[0]
@@ -568,6 +595,20 @@ class AppleMIDISession:
                 if key in self._peers:
                     peer = self._peers[key]
                     break
+
+        if peer is None:
+            # No invitation on record — most commonly because the bridge
+            # restarted while the remote session kept streaming (its data
+            # keeps arriving but it won't re-invite while sync succeeds).
+            # Register the peer from its own data traffic so the return path
+            # (dLive→network) works without waiting for a fresh invitation.
+            # Data port is conventionally control_port + 1.
+            ctrl_key = (addr[0], addr[1] - 1)
+            peer = self._get_or_create_peer(ctrl_key)
+            logger.info(
+                f"*** Registered peer {ctrl_key} from inbound RTP data "
+                f"(data_addr={addr}) — no prior invitation; return path active ***"
+            )
 
         if peer:
             peer.data_addr = addr
